@@ -1,0 +1,25 @@
+# db-auto-router 依赖清单
+#
+# 安装原则：用什么数据库装什么驱动，全部懒加载——没装的驱动不影响 MCP 启动，
+# 只有真正查询该类型数据库时才需要。驱动缺失时报错会带上对应的 pip 安装命令。
+#
+# 快速开始（SQLite 配置库模式 + 只查 MySQL）：
+#     pip install -r requirements.txt
+#     pip install mysql-connector-python
+
+# ---- 必装：加载 .env 配置文件 ----
+python-dotenv>=1.0
+
+# ---- MCP 协议层（官方 SDK）----
+mcp>=1.2
+
+# ---- 业务数据库驱动：按需安装，用哪个装哪个 ----
+# MySQL / 达梦(DM) / PostgreSQL / GaussDB / Oracle
+# mysql-connector-python>=8.0     # 查 MySQL
+# dmPython>=1.0                   # 查达梦（需达梦客户端环境）
+# psycopg2-binary>=2.9            # 查 PostgreSQL / GaussDB（高斯兼容 PG 协议）
+# oracledb>=1.0                   # 查 Oracle
+
+# ---- 可选 ----
+# tkinter 已随 Python 标准库分发，无需安装；但某些精简版 Python 发行版可能阉割，
+# 缺了它写操作确认弹窗会自动降级为 MCP 终端确认（elicitation），不影响功能。

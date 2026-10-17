@@ -1,0 +1,53 @@
+-- ============================================================
+-- db-auto-router v4.3 SQLite 配置库模板
+-- 用 DB Browser (SQLite) 打开同目录下的 datasources.db，
+-- 在 mcp_datasource_config 表中「浏览数据」→「插入新记录」，
+-- 填写以下字段即可注册你的业务数据库。
+--
+-- 字段说明：
+--   dir_path    : 工作目录。填 '*' 或留空 = 任意目录兜底（推荐新手这样填，
+--                 只需改 conn_url / db_user / db_password 三格即可用）。
+--                 多项目区分目录时才填具体路径，如 D:\myproject
+--                 （正斜杠/反斜杠均可，程序自动归一化）
+--   db_name     : 备注名，给自己看的，随便写
+--   db_code     : 数据源编码，查询时用 db_code.table 跨库引用，建议小写下划线
+--   db_type     : 数据库类型，只能填这五种之一：mysql / dm / postgres / gaussdb / oracle
+--   conn_url    : 连接地址，格式随 db_type 而变（原样交给对应驱动）：
+--                   mysql    主机:端口            如 10.0.0.1:3306（库名取自 db_code，别写在这里）
+--                   dm       主机:端口            如 10.0.0.1:5236（schema 由 DM 用户决定）
+--                   postgres libpq 串，必带 dbname 如 host=10.0.0.1 port=5432 dbname=mydb
+--                   gaussdb  同 postgres          如 host=10.0.0.1 port=15432 dbname=mydb
+--                   oracle   主机:端口/服务名      如 10.0.0.1:1521/orcl（也支持 TNS 别名）
+--   db_user     : 用户名
+--   db_password : 密码（明文，本文件仅自用，勿外传）
+--   is_default  : 1 = 默认数据源（该目录下不指定 db_code 时用它），0 = 否
+--   write_confirm : 写操作是否需人工审核（v4.6）。1 = 需审核（默认，弹确认窗）；
+--                   0 = 免审核——该数据源的 execute/import_csv/dump_database 全部
+--                   不弹窗，供开发库随便造数据用。审计日志不受影响。
+--                   生产库保持 1；只有明确的开发库才改 0。
+--
+-- 对应的 MySQL(配置库) 建表语句见 mysql_config.sql，两表结构同构。
+-- ============================================================
+
+-- SQLite 不支持执行本文件中的语句来初始化（程序首次运行会自动建库建表），
+-- 本文件仅作为字段说明文档与 MySQL 版本对照。直接用 DB Browser 编辑 datasources.db 即可。
+
+-- 表结构（程序自动创建，此处仅展示）：
+-- CREATE TABLE IF NOT EXISTS mcp_datasource_config (
+--     dir_path    TEXT NOT NULL DEFAULT '*',
+--     db_name     TEXT,
+--     db_code     TEXT NOT NULL,
+--     db_type     TEXT NOT NULL,
+--     conn_url    TEXT NOT NULL,
+--     db_user     TEXT NOT NULL,
+--     db_password TEXT NOT NULL,
+--     is_default  INTEGER DEFAULT 0,
+--     write_confirm INTEGER NOT NULL DEFAULT 1,
+--     PRIMARY KEY (dir_path, db_code)
+-- );
+
+-- 预置一行兜底示例（可选）：把三处占位改成你的数据库信息后保存
+-- INSERT OR IGNORE INTO mcp_datasource_config
+--     (dir_path, db_name, db_code, db_type, conn_url, db_user, db_password, is_default)
+-- VALUES
+--     ('*', '示例数据源', 'mydb', 'mysql', '127.0.0.1:3306', 'root', '你的密码', 1);
