@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 <#
 .SYNOPSIS
     在本机生成「数据源管理.lnk」（默认放桌面）
