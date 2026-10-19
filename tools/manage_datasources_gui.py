@@ -39,11 +39,10 @@ except ImportError:
     pass
 
 from db_auto_router import config as cfg  # noqa: E402
-from db_auto_router.datasources import (bump_mysql_config_version,  # noqa: E402
-                                        upgrade_sqlite_config_schema,
-                                        mysql_config_has_column,
-                                        ensure_mysql_config_schema)
-from db_auto_router.directconn import explain_dm_connect_error  # noqa: E402
+# datasources / directconn 故意不放在模块顶层导入：datasources → workspace → asyncio
+# （连带 ssl / pywin32）实测约 210ms，directconn 约 150ms，而启动路径只用得到 cfg。
+# 改为首次使用时惰性导入（下面各用点处 from ... import ...）——窗口因此不必等它们，
+# 这笔钱挪到后台线程的数据加载里付，用户先看到窗口。
 import tkinter as tk  # noqa: E402
 from tkinter import ttk, messagebox  # noqa: E402
 
@@ -152,6 +151,7 @@ class SqliteBackend:
             write_confirm INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (dir_path, db_code))""")
         # 老配置库补 db_schema / write_confirm 列（与 MCP 侧共用同一实现，避免 DDL 漂移）
+        from db_auto_router.datasources import upgrade_sqlite_config_schema
         upgrade_sqlite_config_schema(c)
         c.commit()
         return c
@@ -268,16 +268,33 @@ class MysqlBackend:
     # （探测实现共用一份，不在这里再写一遍 information_schema 查询）。
     _columns = {}
 
-    def has_column(self, column):
-        if column not in MysqlBackend._columns:
+    def has_column(self, column, conn=None):
+        """探测配置库是否已有某一列。
+
+        conn 由调用方传入时复用该连接（fetch_all 用）：原来 has_db_schema() 与
+        has_write_confirm() 各自 _conn() 开一条、主查询再开一条，一次列表读要开
+        三条 MySQL 连接，而类级 _columns 缓存只在进程内有效——每次双击都是新进程，
+        缓存对启动路径毫无帮助。不传 conn 时才自开一条，连接生命周期归调用方。
+        """
+        if column in MysqlBackend._columns:
+            return MysqlBackend._columns[column]
+        own = conn is None
+        if own:
             try:
-                c = self._conn()
-                try:
-                    MysqlBackend._columns[column] = mysql_config_has_column(c, column)
-                finally:
-                    c.close()
+                conn = self._conn()
             except Exception:
                 MysqlBackend._columns[column] = False
+                return False
+        try:
+            # 与 MCP 侧 datasources.mysql_config_has_column 同口径（共用一份实现，
+            # 不在这里内联 information_schema 查询，否则两处探测会漂移）
+            from db_auto_router.datasources import mysql_config_has_column
+            MysqlBackend._columns[column] = mysql_config_has_column(conn, column)
+        except Exception:
+            MysqlBackend._columns[column] = False
+        finally:
+            if own:
+                conn.close()
         return MysqlBackend._columns[column]
 
     def has_db_schema(self):
@@ -287,18 +304,22 @@ class MysqlBackend:
         return self.has_column("write_confirm")
 
     def fetch_all(self):
+        # 一条连接走完列探测 + 列表查询：原来两次 has_column 各开一条、主查询再开
+        # 一条，共三条连接（见 has_column 注释）。
         c = self._conn()
         try:
+            has_schema = self.has_column("db_schema", conn=c)
+            has_confirm = self.has_column("write_confirm", conn=c)
             cur = c.cursor(dictionary=True)
             # 缺列时按旧列清单查，字典游标 + .get 自动补空，无需按位置插占位
             cols = ["dir_path", "db_name", "db_code", "db_type", "conn_url", "db_user"]
-            if self.has_db_schema():
+            if has_schema:
                 cols.append("db_schema")
             # 列顺序与 SqliteBackend 保持一致（is_default 在前、write_confirm 在后），
             # 行形状（9 字段）以下方元组构造为准——位置解包的消费方
             # （_apply_rows / on_edit / on_delete / on_test）都按这个顺序取
             cols.append("is_default")
-            if self.has_write_confirm():
+            if has_confirm:
                 cols.append("write_confirm")
             # 排序与 SqliteBackend 同口径：目录分组，组内默认数据源置顶，再按数据库名称
             cur.execute(f"SELECT {', '.join(cols)} FROM mcp_datasource_config"
@@ -383,6 +404,7 @@ class MysqlBackend:
         此处不再内联一份（否则与 MCP 侧 _mysql_probe_version 的三处 DDL 会漂移）。
         失败仅告警：配置本身已写入成功，最坏情况是 MCP 晚一点才感知。
         """
+        from db_auto_router.datasources import bump_mysql_config_version
         err = bump_mysql_config_version()
         if err:
             messagebox.showwarning(
@@ -493,12 +515,14 @@ class MysqlBackend:
         except Exception as e:
             return False, f"无法连接配置库 {self.desc}\n{type(e).__name__}: {e}"
         try:
+            from db_auto_router.datasources import ensure_mysql_config_schema
             ensure_mysql_config_schema(conn)
         except Exception as e:
             return False, f"创建配置表失败：{type(e).__name__}: {e}\n\n可手动执行 docs/mysql_config.sql"
         finally:
             conn.close()
         # 3) 版本号 +1 让 MCP 秒级感知（尽力而为，失败不影响初始化结果）
+        from db_auto_router.datasources import bump_mysql_config_version
         bump_mysql_config_version()
         msg = (f"已初始化配置库 {self.host}:{self.port}/{self.db}\n"
                f"  · {'新建了配置库 ' + self.db if created_db else '配置库已存在'}\n"
@@ -548,6 +572,7 @@ def test_conn(db_type, url, user, pwd, dbname=""):
         # （MCP 真实连接用的就是它），GUI 不另写一遍——两处各翻必然漂移，
         # 于是出现"测试连接说连不上、MCP 说连上了"这种最难查的分裂。
         if db_type == "dm":
+            from db_auto_router.directconn import explain_dm_connect_error
             return False, explain_dm_connect_error(e, url)
         return False, f"{type(e).__name__}: {e}"
 
@@ -1061,6 +1086,29 @@ class App(tk.Tk):
                                           self.backend.fetch_pwd(d, code), code))
 
 
+def _prewarm_imports(backend):
+    """后台预热重导入，与随后的窗口构造重叠，避免串行叠加到启动时间上。
+
+    datasources → workspace → asyncio（连带 ssl / pywin32）实测约 190ms，
+    mysql.connector 约 600ms。这两笔原来都要等 reload 后台线程跑到才第一次导入，
+    那时窗口已经建好——用户看到的就是"窗口出来了，数据空转好几秒"。
+    这里提前在子线程里导一遍，靠导入锁与后续真实导入安全共存（同一模块只初始化一次，
+    后到者直接拿缓存）。失败无所谓：真正的用点会自己再报一次错，这里只求预热。
+    """
+    def _work():
+        try:
+            import db_auto_router.datasources  # noqa: F401  列探测用（两种后端都要）
+        except Exception:
+            pass
+        if backend.kind == "mysql":
+            try:
+                import mysql.connector  # noqa: F401  仅 mysql 后端需要驱动
+            except Exception:
+                pass
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
 def main():
     if sys.platform == "win32":
         try:
@@ -1078,6 +1126,10 @@ def main():
     # 它和 App.__init__ 里的 reload() 会连查两次配置库，且都堵在 mainloop() 之前，
     # 窗口要等两轮 MySQL 往返才出现。现在连接与读取全部走 App 的后台线程，
     # 连不上时由 App._apply_rows() 弹同样的提示（窗口已在，不再一片空白后直接退出）。
+
+    # 重导入预热：放在窗口构造之前，让 asyncio/mysql.connector 的导入与
+    # App.__init__ 的控件构建、以及下面可能出现的模式提醒对话框重叠进行
+    _prewarm_imports(backend)
 
     if mismatch:
         # --backend 强制值与 .env 模式不一致：MCP 读的不是这个库，改动不生效

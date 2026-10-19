@@ -10,8 +10,5 @@ logs/
 *.db-wal
 *.db-shm
 
-# 本机配置（含 MySQL root 密码）
-.env
-
 # 备份
 *.bak-*
