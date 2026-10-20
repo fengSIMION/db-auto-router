@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING, Dict, Any, Optional, List
 
 # Context / Root 仅用于类型标注（Root 还是函数内局部注解，运行时不求值）。
 # 放 TYPE_CHECKING 里，避免 GUI（manage_datasources_gui.py）为了改个数据源配置，
-# 经 datasources → workspace 被拖入整个 mcp/fastmcp/httpx 依赖树（实测 import 10.8s → 0.3s）。
+# 经 datasources → workspace 被拖入整个 mcp/mcp-types/httpx 依赖树（实测 import 10.8s → 0.3s）。
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
-    from mcp.types import Root
+    from mcp.server.mcpserver import Context
+    from mcp_types import Root
 
 from .errors import ToolFailure
 from .logcfg import logger

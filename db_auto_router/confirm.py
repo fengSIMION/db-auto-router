@@ -10,7 +10,7 @@ import asyncio
 from typing import Optional
 
 from pydantic import BaseModel, Field
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from .config import WRITE_CONFIRM_MODE, DIALOG_SQL_PREVIEW_LINES
 from .errors import ToolFailure

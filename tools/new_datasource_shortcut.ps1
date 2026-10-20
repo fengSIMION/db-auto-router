@@ -6,11 +6,13 @@
 .DESCRIPTION
     为什么需要这个脚本：
         .lnk 里存的是绝对路径（pythonw.exe 在哪、图标在哪），没法像 .bat 那样用
-        %~dp0 相对定位，所以**不能随文件夹一起分发**。把整个 db-auto-router 文件夹
-        拷到新机器后，跑一次「生成快捷方式.bat」就能按那台机器的实际路径重建。
+        %~dp0 相对定位，所以**不能随文件夹一起分发**。
 
-        不重建也完全能用——start_datasource_manager.bat 在任何装了 Python 的
-        机器上都能直接双击运行，只是慢一点、且会闪一下终端窗口。
+        本脚本由 start_datasource_manager.bat 在每次启动 GUI 时自动调用（静默、
+        失败不阻断）——把整个 db-auto-router 文件夹拷到新机器后，第一次双击 bat，
+        桌面快捷方式就按那台机器的实际路径重建好了，不需要记得再跑什么。
+
+        也可以手动跑：默认放桌面，用 -Path 指定别的位置。
 
 .PARAMETER Path
     指定 .lnk 输出位置，默认为桌面。

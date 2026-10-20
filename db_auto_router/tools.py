@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from .config import (AUDIT_ENABLED, AUDIT_LOG_DIR, AUDIT_SCAN_DAYS,
                      AUDIT_RETAIN_DAYS, MAX_POOL_SIZE, WRITE_CONFIRM_MODE,

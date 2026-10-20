@@ -1,28 +1,34 @@
 @echo off
-rem Launcher: datasource manager GUI (v4.7, follows .env MCP_CONFIG_MODE)
+rem Launcher: datasource manager GUI (v4.8: one entry point, refreshes the desktop shortcut)
 rem
 rem PORTABILITY: every path here resolves relative to this file (%~dp0), and
 rem pythonw is located via PATH - so the whole folder can be copied as-is to any
 rem machine with Python installed and this .bat just works.
 rem
-rem v4.7 changes:
-rem   1) The `where pythonw` pre-check became a pure-cmd PATH scan (for + if
-rem      exist), which drops one process spawn per launch. If the scan finds
-rem      nothing we still fall back to `where` so a PATH entry containing
-rem      & ^ ( ) can never produce a false "not found".
-rem   2) For a faster, console-free launch, run 生成快捷方式.bat once. It puts
-rem      数据源管理.lnk on the Desktop pointing straight at pythonw.exe
-rem      (skips the cmd.exe hop and the console flash; also pinnable).
-rem      NOTE: a .lnk stores ABSOLUTE paths, so it cannot ship inside the folder.
-rem      Re-run the generator after copying to a new PC. This .bat stays the
-rem      zero-setup, fully portable fallback.
+rem What happens on each launch:
+rem   1. locate pythonw.exe (PATH scan, then `where` fallback)
+rem   2. start the GUI (tools\manage_datasources_gui.py)
+rem   3. refresh the desktop shortcut (.lnk) - best effort, never blocks the GUI.
+rem      A .lnk stores ABSOLUTE paths so it cannot ship inside the folder;
+rem      rebuilding it on every launch is what makes the folder "copy to a new
+rem      PC and it just works" - nothing to remember, no second script to run.
+rem
+rem Failure policy: if the shortcut refresh fails (no PowerShell, execution
+rem policy, ...) we print one hint line and continue. The GUI is the product;
+rem the shortcut is a convenience.
+rem
+rem Custom shortcut location (default: Desktop), run the generator directly:
+rem   powershell -NoProfile -ExecutionPolicy Bypass -File tools\new_datasource_shortcut.ps1 -Path D:\my.lnk
+rem
+rem NOTE: this file is intentionally all-ASCII. Chinese text in a .bat gets
+rem mangled (or worse) under non-UTF-8 console codepages; the Chinese UX lives
+rem in the GUI itself and in the shortcut name, not in this launcher.
 rem
 rem Migration notes (for a new PC):
 rem   - Copy this whole folder as-is; every path is resolved relative to this
 rem     folder (nothing hardcoded to the old machine)
 rem   - If datasources.db does not exist, first launch auto-creates an empty one
 rem   - Requires Python installed with "Add to PATH" checked
-rem   - Optional: run 生成快捷方式.bat for the faster desktop shortcut
 cd /d "%~dp0"
 
 setlocal enabledelayedexpansion
@@ -38,7 +44,7 @@ for %%P in ("%PATH:;=" "%") do (
 rem Definitive fallback: let where.exe have the final say
 if not defined PYW (
   for /f "delims=" %%I in ('where pythonw 2^>nul') do (
-    if not defined PYW set "PYW=%%I"
+    if not defined PYW set "PYW=%%~I"
   )
 )
 
@@ -49,5 +55,14 @@ if not defined PYW (
   exit /b 1
 )
 
+rem 1) GUI first - it is the product, start it before anything slow
 start "" "%PYW%" tools\manage_datasources_gui.py
+
+rem 2) then refresh the desktop shortcut: hidden window, output swallowed,
+rem    failure only hints - never blocks the GUI that is already running.
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0tools\new_datasource_shortcut.ps1" >nul 2>&1
+if errorlevel 1 (
+  echo [HINT] Desktop shortcut refresh failed - the GUI runs fine without it.
+  echo        To retry manually: powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\new_datasource_shortcut.ps1"
+)
 endlocal

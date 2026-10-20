@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""FastMCP 服务器入口：创建实例 + 注册 17 个工具 + stdio 启动
+"""MCP 服务器入口（mcp SDK 2.x）：创建实例 + 注册 17 个工具 + stdio 启动
 ——原 2218–2233、2900–2978 行"""
 
 __author__ = "fengkeju"
 import os
 import sys
 
-from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.server.mcpserver import MCPServer
+from mcp_types import ToolAnnotations
 
 from .config import (MCP_SERVER_INFO, CFG_MODE, SQLITE_DB_PATH,
                      CFG_HOST, CFG_PORT, CFG_DB, MAX_POOL_SIZE,
@@ -23,21 +23,16 @@ from .tools import (query, execute, list_datasources, refresh_datasources, searc
                     explain_query, slow_queries, cleanup_old_audit_logs)
 
 # ------------------------------------------------------------------------------
-# FastMCP 服务器 (官方 mcp SDK 接管协议层：stdio 传输/握手/版本协商/错误码)
+# MCPServer 实例 (官方 mcp SDK 2.x 接管协议层：stdio 传输/握手/版本协商/错误码)
 # ------------------------------------------------------------------------------
-mcp = FastMCP(MCP_SERVER_INFO["name"], instructions="多数据源 SQL 查询路由：按工作目录自动选择数据源，支持跨库语法。query 只读；execute 写操作执行前会向用户弹确认。")
-# 低层 Server 的 version 字段在 initialize 响应中返回给客户端。
-# FastMCP.__init__ 不转发 version（只把 name/instructions/website_url/icons/lifespan
-# 传给低层 MCPServer，已核对 mcp SDK 源码），低层 Server 的 version=None 时会退化成
-# 上报 mcp SDK 自己的版本号。这里只能直接赋值私有属性——没有公开入口。
-# 包一层 try：将来 SDK 若重构掉 _mcp_server，降级为"上报 SDK 版本号"而不是启动即崩。
-try:
-    mcp._mcp_server.version = MCP_SERVER_INFO["version"]
-except Exception as _e:  # pragma: no cover - 仅防御 SDK 未来重构
-    logger.warning(f"无法设置 MCP 版本号（将使用 SDK 默认值）: {_e}")
+# SDK 2.x 起 FastMCP 改名 MCPServer 并搬到 mcp.server.mcpserver，协议类型拆到
+# 独立的 mcp_types 包；构造函数原生收 version（1.x 时代只能篡改私有属性）。
+mcp = MCPServer(MCP_SERVER_INFO["name"],
+                instructions="多数据源 SQL 查询路由：按工作目录自动选择数据源，支持跨库语法。query 只读；execute 写操作执行前会向用户弹确认。",
+                version=MCP_SERVER_INFO["version"])
 
 
-# --- 注册工具：annotations 与 v2.x 完全一致，额外补充 title/structured_output ---
+# --- 注册工具：annotations 补充 title，并声明 structured_output ---
 
 def _register_tools():
     annotations = {
@@ -93,7 +88,7 @@ def _ensure_stdio_encoding():
 
 def main():
     _ensure_stdio_encoding()
-    logger.info(f"MCP Router v{MCP_SERVER_INFO['version']} (FastMCP SDK) 启动")
+    logger.info(f"MCP Router v{MCP_SERVER_INFO['version']} (mcp SDK 2.x) 启动")
     # v4.1：按配置模式显示配置库位置
     if CFG_MODE == "sqlite":
         logger.info(f"配置库: SQLite 文件 {SQLITE_DB_PATH}（dir_path='*' 为任意目录兜底数据源）")
