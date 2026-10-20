@@ -169,7 +169,7 @@ def _sqlite_connect():
 
     WAL 模式：MCP 运行中用户用 DB Browser 同时编辑互不阻塞；
     busy_timeout 兜底极短写锁竞争。
-    check_same_thread=False：FastMCP 工具经 asyncio.to_thread 等多线程进入，
+    check_same_thread=False：MCP 工具经 asyncio.to_thread 等多线程进入，
     每次查询均为「连接→查询→关闭」的短生命周期用法，无跨线程共享连接。
     """
     import sqlite3

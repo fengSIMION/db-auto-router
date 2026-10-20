@@ -10,8 +10,8 @@
 # ---- 必装：加载 .env 配置文件 ----
 python-dotenv>=1.0
 
-# ---- MCP 协议层（官方 SDK）----
-mcp>=1.2
+# ---- MCP 协议层（官方 SDK，2.x 起 FastMCP 改名 MCPServer，见 tests/test_mcp2_startup.py）----
+mcp>=2,<3
 
 # ---- 业务数据库驱动：按需安装，用哪个装哪个 ----
 # MySQL / 达梦(DM) / PostgreSQL / GaussDB / Oracle
