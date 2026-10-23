@@ -48,7 +48,7 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `MCP_TXN_IDLE_TIMEOUT` | `600` | 全局默认空闲超时（秒），超时自动回滚释放 |
+| `MCP_TXN_IDLE_TIMEOUT` | `600` | 全局默认空闲超时（秒），超时自动回滚释放；后台每 5 秒检查一次，事务访问时也会校验是否过期 |
 | `MCP_TXN_MAX_IDLE` | `86400` | 单事务空闲超时的天花板（24 小时），`begin`/`extend` 传超过它的值会被拒绝 |
 
 `begin_transaction(idle_timeout=)` 可在开事务时按需放宽本事务的阈值，不必调大全局默认

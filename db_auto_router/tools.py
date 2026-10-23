@@ -2,6 +2,8 @@
 """17 个 MCP 工具包装（docstring 即工具描述；原 14 个的签名与 docstring 保持兼容，
 v4.5 新增 explain_query / slow_queries / extend_transaction，并在 begin_transaction
 追加可选参数 idle_timeout）
+description 卫生：只写契约（做什么/何时用/约束/返回什么），不写版本沿革——
+它每轮会话全量注入模型上下文，changelog 会稀释关键约束的权重。版本沿革以 git log 为准。
 ——原 2620–2897、2933–2937 行。
 安全清理：list_transactions 改为调用 transactions.list_active_transactions()，
 不再直读 _transactions/_txn_lock 全局。"""
@@ -85,7 +87,7 @@ def _audit_error(tool: str, db_code: str, sql: str, exc: BaseException, txn_id: 
 # --- 工具实现（参数名/工具名与 v2.x 兼容；docstring 即工具 description） ---
 
 async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int] = None, timeout: Optional[int] = None, txn_id: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
-    """执行只读SQL查询。根据当前工作目录自动路由到对应数据库(默认走 is_default=1 的数据源,可用 list_datasources 查看)。仅支持 SELECT/SHOW/DESC/EXPLAIN/WITH 语句。支持跨库查询语法：db_code.table_name 或 database.table_name。未指定 LIMIT 时自动添加 LIMIT 1000;结果超过50行返回摘要(前10行 + total_rows 总数)。返回值含 execution_time_ms(执行耗时,>1000ms 视为慢查询)、dialect(数据库类型,如 mysql/dm/postgres/oracle/gaussdb)。v4.0 新增参数：max_rows(覆盖默认1000行上限,重分析场景用)、timeout(覆盖默认30秒超时,长查询用,单位秒)、txn_id(在指定事务中执行,配合 begin_transaction 使用;事务内同样仅允许只读语句,事务内写数据请用 execute 配合 txn_id,会走服务端确认)。注意：传了 txn_id 时走事务专用连接，max_rows/timeout 均不生效（按默认上限与超时执行）。"""
+    """执行只读SQL查询。根据当前工作目录自动路由到对应数据库(默认走 is_default=1 的数据源,可用 list_datasources 查看)。仅支持 SELECT/SHOW/DESC/EXPLAIN/WITH 语句。支持跨库查询语法：db_code.table_name 或 database.table_name。未指定 LIMIT 时自动添加 LIMIT 1000;结果超过50行返回摘要(前10行 + total_rows 总数)。返回值含 execution_time_ms(执行耗时,>1000ms 视为慢查询)、dialect(数据库类型,如 mysql/dm/postgres/oracle/gaussdb)。max_rows 覆盖默认1000行上限(重分析场景用)；timeout 覆盖默认30秒超时(长查询用,单位秒)；txn_id 在指定事务中执行(配合 begin_transaction 使用;事务内同样仅允许只读语句,事务内写数据请用 execute 配合 txn_id,会走服务端确认)。注意：传了 txn_id 时走事务专用连接，max_rows/timeout 均不生效（按默认上限与超时执行）。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql:
@@ -123,7 +125,7 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
 
 
 async def execute(sql: str, db_code: Optional[str] = None, txn_id: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
-    """执行任意SQL语句（包括INSERT/UPDATE/DELETE等写操作）。写操作执行前会弹出确认框，用户确认后才真正执行（服务端强制，无法绕过）；数据源配置里取消打勾「写操作需人工审核」的开发库除外（v4.6，免确认）。支持跨库查询语法。v4.0 支持多语句批量执行：用分号分隔多条 SQL 会一次确认、顺序执行、全部成功才提交（v4.8 明确边界：纯 DML 批保证原子性、任一失败整批回滚；批内混入 DDL 时 mysql/oracle/达梦的 DDL 隐式提交、无法随批回滚，此时返回值带 atomicity=false 与 atomicity_note，确认弹窗也会提前警示，MUST NOT 对用户说"整批回滚"）；CREATE PROCEDURE/FUNCTION/TRIGGER 等带 BEGIN...END 体的语句整条执行。返回值包含 execution_time_ms（执行耗时毫秒数）；批量时含 batch/total_affected_rows/details。txn_id 参数可在指定事务中执行（配合 begin_transaction）。"""
+    """执行任意SQL语句（包括INSERT/UPDATE/DELETE等写操作）。写操作执行前会弹出确认框，用户确认后才真正执行（服务端强制，无法绕过）；数据源配置里取消打勾「写操作需人工审核」的开发库除外（免确认）。支持跨库查询语法。支持多语句批量执行：用分号分隔多条 SQL 会一次确认、顺序执行、全部成功才提交（边界：纯 DML 批保证原子性、任一失败整批回滚；批内混入 DDL 时 mysql/oracle/达梦的 DDL 隐式提交、无法随批回滚，此时返回值带 atomicity=false 与 atomicity_note，确认弹窗也会提前警示，MUST NOT 对用户说"整批回滚"）；CREATE PROCEDURE/FUNCTION/TRIGGER 等带 BEGIN...END 体的语句整条执行。返回值包含 execution_time_ms（执行耗时毫秒数）；批量时含 batch/total_affected_rows/details。txn_id 参数可在指定事务中执行（配合 begin_transaction）。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql:
@@ -199,7 +201,7 @@ async def execute(sql: str, db_code: Optional[str] = None, txn_id: Optional[str]
 
 
 async def begin_transaction(db_code: Optional[str] = None, idle_timeout: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
-    """开启数据库事务（v4.0）。创建专用连接并关闭自动提交，返回 txn_id。后续用 query/execute 传 txn_id 在事务中执行，最后用 commit_transaction 提交或 rollback_transaction 回滚。事务空闲超过默认600秒自动回滚释放（MCP_TXN_IDLE_TIMEOUT 可调）。同一事务内所有语句共用同一连接，保证跨语句原子性。v4.5 新增 idle_timeout 参数：按事务覆盖空闲超时秒数（None=用全局默认600），长流程建议直接放宽（如 3600），上限受 MCP_TXN_MAX_IDLE 约束。事务内活动会自动刷新空闲计时；长时间无人操作前可调 extend_transaction 续期，过期后只能重新开始。"""
+    """开启数据库事务。创建专用连接并关闭自动提交，返回 txn_id。后续用 query/execute 传 txn_id 在事务中执行，最后用 commit_transaction 提交或 rollback_transaction 回滚。事务空闲超过默认600秒自动回滚释放（MCP_TXN_IDLE_TIMEOUT 可调；后台每5秒检查一次，事务访问时也会检查是否已过期）。同一事务内所有语句共用同一连接，保证跨语句原子性。idle_timeout 参数：按事务覆盖空闲超时秒数（None=用全局默认600），长流程建议直接放宽（如 3600），上限受 MCP_TXN_MAX_IDLE 约束。事务内活动会自动刷新空闲计时；长时间无人操作前可调 extend_transaction 续期，过期后只能重新开始。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     try:
@@ -217,7 +219,7 @@ async def begin_transaction(db_code: Optional[str] = None, idle_timeout: Optiona
 
 
 async def extend_transaction(txn_id: str, extend_seconds: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
-    """续期事务（v4.5）。刷新该事务的空闲计时，并可用 extend_seconds 放宽它的空闲阈值（只升不降）。必须在事务过期之前调用——过期后 txn_id 已释放，只能重新 begin_transaction。用 list_transactions 看 idle_remaining_seconds 判断该不该续期。参数：txn_id(必填)、extend_seconds(可选,把空闲阈值提升到至少这么多秒;受 MCP_TXN_MAX_IDLE 上限约束)。"""
+    """续期事务。刷新该事务的空闲计时，并可用 extend_seconds 放宽它的空闲阈值（只升不降）。必须在事务过期之前调用——过期后 txn_id 已释放，只能重新 begin_transaction。用 list_transactions 看 idle_remaining_seconds 判断该不该续期。参数：txn_id(必填)、extend_seconds(可选,把空闲阈值提升到至少这么多秒;受 MCP_TXN_MAX_IDLE 上限约束)。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not txn_id:
@@ -240,7 +242,7 @@ async def extend_transaction(txn_id: str, extend_seconds: Optional[int] = None, 
 
 
 async def commit_transaction(txn_id: str, ctx: Context = None) -> dict[str, Any]:
-    """提交事务（v4.0）。提交后事务内所有语句的修改永久生效，专用连接关闭。必须传 begin_transaction 返回的 txn_id。"""
+    """提交事务。提交后事务内所有语句的修改永久生效，专用连接关闭。必须传 begin_transaction 返回的 txn_id。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not txn_id:
@@ -259,7 +261,7 @@ async def commit_transaction(txn_id: str, ctx: Context = None) -> dict[str, Any]
 
 
 async def rollback_transaction(txn_id: str, ctx: Context = None) -> dict[str, Any]:
-    """回滚事务（v4.0）。撤销事务内所有未提交修改，专用连接关闭。必须传 begin_transaction 返回的 txn_id。"""
+    """回滚事务。撤销事务内所有未提交修改，专用连接关闭。必须传 begin_transaction 返回的 txn_id。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not txn_id:
@@ -277,7 +279,7 @@ async def rollback_transaction(txn_id: str, ctx: Context = None) -> dict[str, An
 
 
 async def list_transactions(ctx: Context = None) -> dict[str, Any]:
-    """列出当前活跃的事务（v4.0）。返回每个事务的 txn_id、数据源、已执行语句数、存活时长、空闲阈值与剩余可空闲时长（v4.5 新增 idle_timeout_seconds / idle_remaining_seconds / expires_soon）。超时事务会先被清理。"""
+    """列出当前活跃的事务。返回每个事务的 txn_id、数据源、已执行语句数、存活时长、空闲阈值与剩余可空闲时长（idle_timeout_seconds / idle_remaining_seconds / expires_soon）。超时事务会先被清理。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     # 轻量操作：不占数据库连接，直接卸载不过闸门（否则会被长查询堵在闸门后面）
@@ -286,7 +288,7 @@ async def list_transactions(ctx: Context = None) -> dict[str, Any]:
 
 
 async def export_csv(sql: str, file_path: str, db_code: Optional[str] = None, timeout: Optional[int] = None, max_rows: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
-    """导出查询结果为 CSV 文件（v4.0 重武器）。只读查询，绕过常规 1000 行返回限制，游标流式分批写入，支持大结果集（默认上限500万行，MCP_EXPORT_MAX_ROWS 可调）。参数：sql(只读查询)、file_path(输出 CSV 路径,目录不存在会自动创建,用 utf-8-sig 编码 Excel 可直接打开)、timeout(可选,长查询超时秒数)、max_rows(可选,覆盖行数上限)。返回 file_path/rows_exported/columns。"""
+    """导出查询结果为 CSV 文件（重武器）。只读查询，绕过常规 1000 行返回限制，游标流式分批写入，支持大结果集（默认上限500万行，MCP_EXPORT_MAX_ROWS 可调）。参数：sql(只读查询)、file_path(输出 CSV 路径,目录不存在会自动创建,用 utf-8-sig 编码 Excel 可直接打开)、timeout(可选,长查询超时秒数)、max_rows(可选,覆盖行数上限)。返回 file_path/rows_exported/columns。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql or not file_path:
@@ -310,7 +312,7 @@ async def export_csv(sql: str, file_path: str, db_code: Optional[str] = None, ti
 
 
 async def import_csv(file_path: str, table_name: str, db_code: Optional[str] = None, truncate_first: bool = False, ctx: Context = None) -> dict[str, Any]:
-    """导入 CSV 文件到表（v4.0 重武器）。按 CSV 表头映射列名，executemany 分批插入（默认500行/批），全部成功才提交、任一失败整批回滚（原子性）。写操作会先弹确认框（数据源取消打勾「写操作需人工审核」的开发库除外，v4.6）。参数：file_path(CSV 路径,首行为列名表头)、table_name(目标表,支持 db.table 跨库语法)、truncate_first(True=导入前先清空表,危险操作;清空走 DELETE FROM 而非 TRUNCATE,以保住"失败整批回滚"的原子性)。注意：CSV 表头列名必须与目标表字段名一致；CSV 中的空字符串按 NULL 写入目标列。"""
+    """导入 CSV 文件到表（重武器）。按 CSV 表头映射列名，executemany 分批插入（默认500行/批），全部成功才提交、任一失败整批回滚（原子性）。写操作会先弹确认框（数据源取消打勾「写操作需人工审核」的开发库除外）。参数：file_path(CSV 路径,首行为列名表头)、table_name(目标表,支持 db.table 跨库语法)、truncate_first(True=导入前先清空表,危险操作;清空走 DELETE FROM 而非 TRUNCATE,以保住"失败整批回滚"的原子性)。注意：CSV 表头列名必须与目标表字段名一致；CSV 中的空字符串按 NULL 写入目标列。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not file_path or not table_name:
@@ -410,7 +412,7 @@ async def dump_database(db_code: str, file_path: str, include_data: bool = True,
 
 
 async def query_audit_log(limit: int = 20, tool: Optional[str] = None, db_code: Optional[str] = None, days: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
-    """查询审计日志（v4.0）。每条 SQL 操作（query/execute/事务/导入导出）都落盘为 JSON 行（按天分文件），本工具倒序返回最近记录，用于追溯"到底执行了什么"。参数：limit(返回条数,默认20)、tool(按工具名过滤,如 execute)、db_code(按数据源过滤)、days(扫描最近几天的日志文件,默认取环境变量 MCP_AUDIT_LOG_SCAN_DAYS=30;传 0 表示不限天数、扫描全部文件)。"""
+    """查询审计日志。每条 SQL 操作（query/execute/事务/导入导出）都落盘为 JSON 行（按天分文件），本工具倒序返回最近记录，用于追溯"到底执行了什么"。参数：limit(返回条数,默认20)、tool(按工具名过滤,如 execute)、db_code(按数据源过滤)、days(扫描最近几天的日志文件,默认取环境变量 MCP_AUDIT_LOG_SCAN_DAYS=30;传 0 表示不限天数、扫描全部文件)。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     # 审计日志是本地文件读取，不占数据库连接，直接卸载不过闸门
@@ -495,7 +497,7 @@ def cleanup_old_audit_logs(retain_days: int) -> list:
 
 
 async def list_datasources(ctx: Context = None) -> dict[str, Any]:
-    """列出当前工作目录可用的所有数据源，包括默认数据源标记、写操作是否需人工审核（v4.6：write_confirm=0 的数据源是开发库，execute/import_csv/dump_database 对其免确认）"""
+    """列出当前工作目录可用的所有数据源，包括默认数据源标记、写操作是否需人工审核（write_confirm=0 的数据源是开发库，execute/import_csv/dump_database 对其免确认）"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     # 数据源缓存是本地文件/配置库探测，不占业务连接池，直接卸载不过闸门
@@ -532,7 +534,7 @@ async def refresh_datasources(ctx: Context = None) -> dict[str, Any]:
 
 
 async def search_tables(keyword: str, db_code: Optional[str] = None, limit: int = 10, ctx: Context = None) -> dict[str, Any]:
-    """根据业务含义搜索匹配的表名。支持表名关键词和表注释模糊匹配(传 % 可浏览全表)。返回 {data:[表名/注释], total_count:匹配总数, returned:本次返回条数, limit}。不再返回 row_count(估算不准,需精确行数请用 query COUNT)。"""
+    """根据业务含义搜索匹配的表名。支持表名关键词和表注释模糊匹配(传 % 可浏览全表)。返回 {data:[表名/注释], total_count:匹配总数, returned:本次返回条数, limit}。需要精确行数请用 query COUNT。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not keyword:
@@ -580,7 +582,7 @@ async def get_schema_info(table_name: str, db_code: Optional[str] = None, ctx: C
 
 
 async def explain_query(sql: str, db_code: Optional[str] = None, analyze: bool = False, fmt: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
-    """查看 SQL 的执行计划并自动诊断（v4.5）。方言自适应：MySQL 用 EXPLAIN [FORMAT=JSON|TREE]，PostgreSQL/GaussDB 用 EXPLAIN [(ANALYZE, BUFFERS) FORMAT TEXT|JSON]，Oracle 用 EXPLAIN PLAN FOR + DBMS_XPLAN，达梦用 EXPLAIN。返回 plan（表格方言）或 plan_text（文本方言）、execution_time_ms、warnings（自动诊断：全表扫描/有索引未用/filesort/临时表/行数估算偏差等）、verdict（ok/needs_attention/poor）。参数：sql(要分析的 SELECT)、analyze(默认 false；true 取实际执行计划——MySQL 需 8.0.18+、PG 用 EXPLAIN ANALYZE BUFFERS，会真实执行一遍该 SELECT，大表有实际耗时成本)、fmt(输出格式，MySQL 支持 JSON/TREE、PG 支持 TEXT/JSON，其它方言忽略)。诊断只在表格格式（MySQL TRADITIONAL / PG TEXT）下进行，JSON/TREE 输出会在 note 中说明跳过。方言不支持或版本不够时自动降级为普通 EXPLAIN 并在 note 说明，不会报错。"""
+    """查看 SQL 的执行计划并自动诊断。方言自适应：MySQL 用 EXPLAIN [FORMAT=JSON|TREE]，PostgreSQL/GaussDB 用 EXPLAIN [(ANALYZE, BUFFERS) FORMAT TEXT|JSON]，Oracle 用 EXPLAIN PLAN FOR + DBMS_XPLAN，达梦用 EXPLAIN。返回 plan（表格方言）或 plan_text（文本方言）、execution_time_ms、warnings（自动诊断：全表扫描/有索引未用/filesort/临时表/行数估算偏差等）、verdict（ok/needs_attention/poor）。参数：sql(要分析的 SELECT)、analyze(默认 false；true 取实际执行计划——MySQL 需 8.0.18+、PG 用 EXPLAIN ANALYZE BUFFERS，会真实执行一遍该 SELECT，大表有实际耗时成本)、fmt(输出格式，MySQL 支持 JSON/TREE、PG 支持 TEXT/JSON，其它方言忽略)。诊断只在表格格式（MySQL TRADITIONAL / PG TEXT）下进行，JSON/TREE 输出会在 note 中说明跳过。方言不支持或版本不够时自动降级为普通 EXPLAIN 并在 note 说明，不会报错。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql:
@@ -607,7 +609,7 @@ async def explain_query(sql: str, db_code: Optional[str] = None, analyze: bool =
 
 
 async def slow_queries(db_code: Optional[str] = None, limit: int = 20, include_running: bool = True, ctx: Context = None) -> dict[str, Any]:
-    """查看慢查询与正在执行的语句（v4.5）。按方言尽力而为：MySQL 读 mysql.slow_log（需 slow_query_log=ON 且 log_output=TABLE，否则回落 SHOW FULL PROCESSLIST 给正在执行的语句），PostgreSQL/GaussDB 读 pg_stat_statements + pg_stat_activity，Oracle/达梦查 v$session/v$sql（需动态性能视图权限）。返回 source / entries / note。注意：本工具不承诺一定有历史慢查询——各方言前置条件差异很大，拿不到会在 note 里说明缺什么并回落给在跑语句，不会报错。参数：limit(返回条数,默认20,上限200)、include_running(是否包含正在执行的语句,默认 true)。"""
+    """查看慢查询与正在执行的语句。按方言尽力而为：MySQL 读 mysql.slow_log（需 slow_query_log=ON 且 log_output=TABLE，否则回落 SHOW FULL PROCESSLIST 给正在执行的语句），PostgreSQL/GaussDB 读 pg_stat_statements + pg_stat_activity，Oracle/达梦查 v$session/v$sql（需动态性能视图权限）。返回 source / entries / note。注意：本工具不承诺一定有历史慢查询——各方言前置条件差异很大，拿不到会在 note 里说明缺什么并回落给在跑语句，不会报错。参数：limit(返回条数,默认20,上限200)、include_running(是否包含正在执行的语句,默认 true)。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     resolved_db_code = db_code or ""

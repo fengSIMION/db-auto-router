@@ -1010,10 +1010,7 @@ class App(tk.Tk):
         changed = (prev_fp is not None and new_fp is not None and prev_fp != new_fp)
         fp_text = self.backend.fingerprint_text()
         self.status.configure(
-            text=f"已重读 {self.backend.desc}，共 {len(self._rows)} 条 ｜ "
-                 f"{fp_text} ｜ "
-                 f"MCP 侧自动感知变更（{('刚检测到新变更，' if changed else '')}"
-                 f"下一次查询即为新配置） ｜ MCP 版本 v{cfg.MCP_SERVER_INFO['version']}")
+            text=f"数据源列表已刷新，共 {len(self._rows)} 条")
         messagebox.showinfo(
             "刷新数据源完成",
             f"已重新读取：{self.backend.desc}\n\n"

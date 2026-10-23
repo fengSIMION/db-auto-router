@@ -6,14 +6,15 @@
 
 v4.5 续期能力：空闲阈值从"全局一个常量"改为"每事务一份"，
 配合 extend_transaction_impl() 支持运行中续期。
-语义未变——仍是纯空闲超时，事务内任何活动都会经 _get_transaction 刷新 last_used，
-所以活跃事务永远不会被清掉；只有真的没人理它满 N 秒才回滚。
+    语义未变——仍是纯空闲超时；事务访问先检查是否过期，完成后刷新 last_used，
+    正在执行的语句不会被清理线程当作空闲事务回滚。
 全局默认（TXN_IDLE_TIMEOUT=600s）保持不变，长流程按事务自行放宽。"""
 
 __author__ = "fengkeju"
 import time
 import uuid
 import threading
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
 
 from .config import TXN_IDLE_TIMEOUT, TXN_MAX_IDLE, MAX_RESULT_ROWS, SUMMARY_DISPLAY_ROWS
@@ -25,6 +26,9 @@ from .sqlguard import split_sql_statements, is_ddl_operation
 # 事务注册表：{txn_id: {conn, ds, db_code, target_db, created_at, last_used, stmt_count, idle_timeout}}
 _transactions: Dict[str, Dict[str, Any]] = {}
 _txn_lock = threading.Lock()
+_txn_cleanup_thread = None
+_txn_cleanup_stop = threading.Event()
+_TXN_CLEANUP_INTERVAL = 5.0
 
 
 def _resolve_idle_timeout(requested: Optional[int]) -> int:
@@ -52,30 +56,112 @@ def _resolve_idle_timeout(requested: Optional[int]) -> int:
 def _cleanup_expired_transactions() -> List[str]:
     """回滚并释放超过空闲时限的事务，返回被清理的 txn_id 列表"""
     expired = []
-    now = time.time()
+    now = time.monotonic()
     with _txn_lock:
         for txn_id, info in list(_transactions.items()):
-            # 每事务各自的阈值；老注册表项（v4.5 之前创建的）缺字段时回落全局默认
             idle = info.get("idle_timeout", TXN_IDLE_TIMEOUT)
-            if now - info.get("last_used", now) > idle:
-                expired.append(txn_id)
-    for txn_id in expired:
+            exec_lock = info.get("exec_lock")
+            if (not (exec_lock and exec_lock.locked())
+                    and now - info.get("last_used", now) > idle):
+                if _transactions.get(txn_id) is info:
+                    _transactions.pop(txn_id)
+                    expired.append((txn_id, info))
+    expired_ids = []
+    for txn_id, info in expired:
         try:
-            _end_transaction(txn_id, commit=False, reason=f"空闲超过阈值自动回滚")
+            _finish_transaction(info, commit=False, reason="空闲超过阈值自动回滚")
             logger.info(f"事务 {txn_id} 空闲超时，已自动回滚")
         except Exception as e:
             logger.warning(f"清理过期事务 {txn_id} 失败: {e}")
-    return expired
+        expired_ids.append(txn_id)
+    return expired_ids
 
 
-def _get_transaction(txn_id: str) -> Dict[str, Any]:
-    """取事务上下文，不存在则抛异常"""
+def start_transaction_cleanup_thread() -> None:
+    """启动事务过期清理线程；事务超时后定期回滚并释放连接。"""
+    global _txn_cleanup_thread
+    if _txn_cleanup_thread is not None and _txn_cleanup_thread.is_alive():
+        return
+    _txn_cleanup_stop.clear()
+
+    def cleanup_loop() -> None:
+        while not _txn_cleanup_stop.wait(_TXN_CLEANUP_INTERVAL):
+            try:
+                _cleanup_expired_transactions()
+            except Exception as e:
+                logger.warning(f"事务超时清理异常: {e}")
+
+    _txn_cleanup_thread = threading.Thread(
+        target=cleanup_loop, name="transaction-cleanup", daemon=True
+    )
+    _txn_cleanup_thread.start()
+    logger.info(f"事务超时清理线程已启动，检查间隔: {_TXN_CLEANUP_INTERVAL:g}s")
+
+
+def _missing_transaction(txn_id: str) -> ToolFailure:
+    return ToolFailure(
+        f"事务 {txn_id} 不存在（可能已提交/回滚/超时释放）。用 list_transactions 查看活跃事务"
+    )
+
+
+def _finish_transaction_locked(info: Dict[str, Any], commit: bool, reason: str = "") -> str:
+    """结束事务；调用方已持有该事务的 exec_lock。"""
+    conn = info["conn"]
+    try:
+        if commit:
+            conn.commit()
+            return "已提交"
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return f"已回滚（{reason}）" if reason else "已回滚"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _finish_transaction(info: Dict[str, Any], commit: bool, reason: str = "") -> str:
+    """调用方已从注册表摘除事务；串行化结束动作并关闭专用连接。"""
+    with info.get("exec_lock", threading.Lock()):
+        return _finish_transaction_locked(info, commit=commit, reason=reason)
+
+
+@contextmanager
+def _transaction_access(txn_id: str):
+    """串行访问事务；先检查过期，再刷新时间，避免过期事务被调用复活。"""
     with _txn_lock:
         info = _transactions.get(txn_id)
-    if not info:
-        raise ToolFailure(f"事务 {txn_id} 不存在（可能已提交/回滚/超时释放）。用 list_transactions 查看活跃事务")
-    info["last_used"] = time.time()
-    return info
+        if not info:
+            raise _missing_transaction(txn_id)
+        exec_lock = info.get("exec_lock")
+        if exec_lock is None:
+            exec_lock = threading.Lock()
+            info["exec_lock"] = exec_lock
+    with exec_lock:
+        expired = False
+        with _txn_lock:
+            if _transactions.get(txn_id) is not info:
+                raise _missing_transaction(txn_id)
+            now = time.monotonic()
+            idle = info.get("idle_timeout", TXN_IDLE_TIMEOUT)
+            if now - info.get("last_used", now) > idle:
+                _transactions.pop(txn_id)
+                expired = True
+            else:
+                info["last_used"] = now
+        if expired:
+            _finish_transaction_locked(info, commit=False, reason="空闲超过阈值自动回滚")
+            logger.info(f"事务 {txn_id} 空闲超时，已自动回滚")
+            raise ToolFailure(f"事务 {txn_id} 已因空闲超时自动回滚释放，请重新开启事务")
+        try:
+            yield info
+        finally:
+            with _txn_lock:
+                if _transactions.get(txn_id) is info:
+                    info["last_used"] = time.monotonic()
 
 
 def _end_transaction(txn_id: str, commit: bool, reason: str = "") -> Dict[str, Any]:
@@ -84,25 +170,8 @@ def _end_transaction(txn_id: str, commit: bool, reason: str = "") -> Dict[str, A
         info = _transactions.pop(txn_id, None)
     if not info:
         raise ToolFailure(f"事务 {txn_id} 不存在")
-    # 与 execute_in_transaction 用同一把锁：否则"正在执行中"与"正在提交"会交叉，
-    # 可能出现 commit 先跑、执行中的语句随后落在一个已提交的连接上
-    with info.get("exec_lock", threading.Lock()):
-        conn = info["conn"]
-        try:
-            if commit:
-                conn.commit()
-                action = "已提交"
-            else:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                action = f"已回滚（{reason}）" if reason else "已回滚"
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    # 与 execute_in_transaction 用同一把锁，避免提交/回滚与正在执行的语句交叉。
+    action = _finish_transaction(info, commit=commit, reason=reason)
     return {
         "txn_id": txn_id,
         "action": action,
@@ -131,8 +200,8 @@ def begin_transaction_impl(ds: Dict[str, str], db_code: str, target_db: str = No
             "ds": ds,
             "db_code": db_code,
             "target_db": target_db,
-            "created_at": time.time(),
-            "last_used": time.time(),
+            "created_at": time.monotonic(),
+            "last_used": time.monotonic(),
             "stmt_count": 0,
             "idle_timeout": effective_idle,
             # 本事务专属执行锁。事务的全部语义就是"所有语句共用同一条连接"，
@@ -164,22 +233,20 @@ def extend_transaction_impl(txn_id: str, extend_seconds: Optional[int] = None) -
 
     extend_seconds 同样受 MCP_TXN_MAX_IDLE 上限约束。
     """
-    info = _get_transaction(txn_id)  # 不存在即抛 ToolFailure（含 list_transactions 提示）
-    now = time.time()
-    with _txn_lock:
-        old_idle = info.get("idle_timeout", TXN_IDLE_TIMEOUT)
-        new_idle = old_idle
-        extended = False
-        if extend_seconds is not None:
-            new_idle = _resolve_idle_timeout(extend_seconds)
-            if new_idle > old_idle:
-                extended = True
-            else:
-                # 只收紧不放宽：调用方传一个比当前更小的值，不能借此把阈值降下来
-                new_idle = old_idle
-            info["idle_timeout"] = new_idle
-        info["last_used"] = now
-        statements = info.get("stmt_count", 0)
+    with _transaction_access(txn_id) as info:
+        with _txn_lock:
+            old_idle = info.get("idle_timeout", TXN_IDLE_TIMEOUT)
+            new_idle = old_idle
+            extended = False
+            if extend_seconds is not None:
+                new_idle = _resolve_idle_timeout(extend_seconds)
+                if new_idle > old_idle:
+                    extended = True
+                else:
+                    # 只收紧不放宽：调用方传一个比当前更小的值，不能借此把阈值降下来
+                    new_idle = old_idle
+                info["idle_timeout"] = new_idle
+            statements = info.get("stmt_count", 0)
 
     logger.info(f"事务 {txn_id} 续期: 空闲阈值 {old_idle}s → {new_idle}s")
     return {
@@ -199,28 +266,23 @@ def extend_transaction_impl(txn_id: str, extend_seconds: Optional[int] = None) -
 
 def execute_in_transaction(txn_id: str, sql: str) -> Dict[str, Any]:
     """在事务中执行 SQL（不 commit，由 commit/rollback 决定）"""
-    info = _get_transaction(txn_id)
     statements = split_sql_statements(sql)
     if not statements:
         raise ValueError("SQL 为空")
-    # DDL 一律拒绝进事务：MySQL/Oracle/达梦的 DDL 会隐式提交当前事务，
-    # 此前的 INSERT/UPDATE 在 DDL 那一刻就已落库，而 rollback_transaction
-    # 仍会返回"已回滚"——静默的数据完整性事故。事务的契约是"跨语句原子性"，
-    # DDL 从定义上就不满足，宁可明确拒绝也不要给出假的原子性承诺。
-    ddl_hit = next((s for s in statements if is_ddl_operation(s)), None)
-    if ddl_hit is not None:
-        raise ToolFailure(
-            "事务内不允许执行 DDL（CREATE/ALTER/DROP/TRUNCATE/RENAME）："
-            "DDL 会隐式提交当前事务，导致本事务中此前的语句全部落库且无法回滚，"
-            "而 commit/rollback 仍会报告成功。请先 commit/rollback 结束事务，"
-            f"再用不带 txn_id 的 execute 执行该 DDL。问题语句: {ddl_hit[:120]}"
-        )
-    # 事务专属执行锁：整个"取游标→执行→取结果"序列必须原子。
-    # 少了它，两个并发调用带同一个 txn_id 会共用一条物理连接——互相读走对方的
-    # 结果集（数据串台），且一方报错后异常路径会 rollback + pop + close，
-    # 另一方还在执行中，收到"连接已关闭"而它以为事务还开着。
-    # 代价只是同一事务内的语句被串行化，而这本来就是事务的语义。
-    with info.get("exec_lock", threading.Lock()):
+    with _transaction_access(txn_id) as info:
+        # DDL 一律拒绝进事务：MySQL/Oracle/达梦的 DDL 会隐式提交当前事务，
+        # 此前的 INSERT/UPDATE 在 DDL 那一刻就已落库，而 rollback_transaction
+        # 仍会返回"已回滚"——静默的数据完整性事故。事务的契约是"跨语句原子性"，
+        # DDL 从定义上就不满足，宁可明确拒绝也不要给出假的原子性承诺。
+        ddl_hit = next((s for s in statements if is_ddl_operation(s)), None)
+        if ddl_hit is not None:
+            raise ToolFailure(
+                "事务内不允许执行 DDL（CREATE/ALTER/DROP/TRUNCATE/RENAME）："
+                "DDL 会隐式提交当前事务，导致本事务中此前的语句全部落库且无法回滚，"
+                "而 commit/rollback 仍会报告成功。请先 commit/rollback 结束事务，"
+                f"再用不带 txn_id 的 execute 执行该 DDL。问题语句: {ddl_hit[:120]}"
+            )
+
         conn = info["conn"]
         dialect = info["ds"].get("db_type", "").lower().strip()
         cursor = None
@@ -263,17 +325,11 @@ def execute_in_transaction(txn_id: str, sql: str) -> Dict[str, Any]:
                 out["total_rows"] = results[0]["rows"]
             return out
         except Exception as e:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            # 事务内出错：自动终止事务，防止半提交状态被继续误用
             with _txn_lock:
-                _transactions.pop(txn_id, None)
-            try:
-                conn.close()
-            except Exception:
-                pass
+                if _transactions.get(txn_id) is info:
+                    _transactions.pop(txn_id)
+            # 事务内出错：自动终止事务，防止半提交状态被继续误用。
+            _finish_transaction_locked(info, commit=False, reason="事务内执行失败")
             raise RuntimeError(f"事务 {txn_id} 执行失败已自动回滚并终止: {e}") from e
         finally:
             if cursor:
@@ -291,12 +347,14 @@ def list_active_transactions() -> Dict[str, Any]:
     续期工具也就永远不会被用起来。这两个字段是续期能力真正生效的前提。
     """
     expired = _cleanup_expired_transactions()
-    now = time.time()
+    now = time.monotonic()
     with _txn_lock:
         items = []
         for txn_id, info in _transactions.items():
             idle = info.get("idle_timeout", TXN_IDLE_TIMEOUT)
-            remaining = max(0, round(idle - (now - info.get("last_used", now)), 1))
+            exec_lock = info.get("exec_lock")
+            idle_elapsed = 0 if exec_lock and exec_lock.locked() else now - info.get("last_used", now)
+            remaining = max(0, round(idle - idle_elapsed, 1))
             items.append({
                 "txn_id": txn_id,
                 "db_code": info.get("db_code"),

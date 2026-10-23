@@ -174,8 +174,9 @@ where python
 | `explain_query` | 执行计划 + 自动诊断（全表扫描/索引未用/filesort/统计信息过期） | — |
 | `slow_queries` | 慢查询与正在执行的语句（按方言尽力而为） | — |
 
-事务默认空闲 600 秒自动回滚放锁（`MCP_TXN_IDLE_TIMEOUT` 可调）；必须在过期前
-`commit` / `rollback` / `extend_transaction`，过期后只能重开事务。
+事务默认空闲 600 秒自动回滚放锁（`MCP_TXN_IDLE_TIMEOUT` 可调）；后台每 5 秒检查一次，
+事务访问时也会检查是否已过期。超时事务会由后台清理线程回滚并释放连接；过期的
+`txn_id` 不能通过继续执行语句续活，只能重新开启事务。
 
 ## 🔐 安全设计
 
