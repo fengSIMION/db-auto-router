@@ -16,6 +16,7 @@ from .config import (MCP_SERVER_INFO, CFG_MODE, SQLITE_DB_PATH,
                      AUDIT_ENABLED, AUDIT_LOG_DIR, AUDIT_SCAN_DAYS, AUDIT_RETAIN_DAYS)
 from .logcfg import logger
 from .pool import start_pool_cleanup_thread
+from .transactions import start_transaction_cleanup_thread
 from .tools import (query, execute, list_datasources, refresh_datasources, search_tables,
                     get_schema_info, begin_transaction, commit_transaction,
                     rollback_transaction, list_transactions, extend_transaction,
@@ -109,6 +110,8 @@ def main():
 
     # 启动连接池清理线程（进程生命周期内清理过期连接）
     start_pool_cleanup_thread()
+    # 定期回滚并关闭超过空闲阈值的事务专用连接
+    start_transaction_cleanup_thread()
 
     # 审计日志过期清理（仅当 MCP_AUDIT_LOG_RETAIN_DAYS > 0）。
     # 放在启动时做一次：会话启动频繁，等于定期清理；默认 0 = 永久保留不删。
