@@ -116,5 +116,5 @@ WRITE_SQL_PREFIXES = {"INSERT", "DELETE", "UPDATE", "DROP", "TRUNCATE", "ALTER",
 # 与 README 标题 / GUI / 启动脚本保持同一个号，别只改一处。
 MCP_SERVER_INFO = {
     "name": "db-auto-router",
-    "version": "4.7"
+    "version": "4.9"
 }
