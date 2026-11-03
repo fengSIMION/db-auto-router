@@ -86,7 +86,7 @@ $lnk.TargetPath        = $pyw
 $lnk.Arguments        = "tools\manage_datasources_gui.py"
 $lnk.WorkingDirectory = $proj
 $lnk.IconLocation     = "$ico,0"
-$lnk.Description      = "db-auto-router 数据源管理（直连 pythonw，无终端黑窗）"
+$lnk.Description      = "db-auto-router 数据源管理"
 $lnk.WindowStyle      = 1
 $lnk.Save()
 

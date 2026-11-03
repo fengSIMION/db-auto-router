@@ -164,6 +164,53 @@ def upgrade_sqlite_config_schema(conn) -> None:
             logger.info(f"SQLite 配置库已自动升级：新增 {col} 列（{why}）")
 
 
+def check_datasource_conflict(fetch, orig, v, ph="?"):
+    """保存前预检数据源配置行，有冲突返回错误信息，无冲突返回 ""。
+
+    orig=None 表示新增；orig=(dir_path, db_code) 表示正在改这一行。
+    fetch(sql, params) 由调用方给出（各自方言已打开的连接），ph 是占位符
+    （SQLite 用 ?，MySQL 用 %s）——业务规则只写这一份，GUI 与 CLI 共用，
+    否则两边校验标准必然漂移（与 bump_mysql_config_version 收敛 DDL 同一个理由）。
+
+    两条规则：
+    1. (dir_path, db_code) 唯一：同一工作目录下数据库名称不能重复。跨库查询本来就
+       用 db_code.table 引用，不需要给同一个库登记两个名字。
+    2. 同一目录只能有一个默认数据源：MCP 侧按 is_default DESC, db_code 取默认，
+       多个 is_default=1 时字母序第一个胜出——用户在 B 上勾"设为默认"、界面也打了勾，
+       实际生效的却是 A，且不报错。与其这样静默跑偏，不如保存时就说清楚。
+
+    数据库主键 (dir_path, db_code) 仍然兜底（并发/外部改库的场景），这里只是把
+    "写失败后弹错"提前成"写之前告知"。
+    """
+    def norm(x):
+        return (x or "").strip()
+
+    if orig:
+        orig = (norm(orig[0]) or "*", norm(orig[1]))
+    d, code = norm(v.get("dir")) or "*", norm(v.get("code"))
+
+    # 1) 唯一性。orig 指向的那一行就是"自己"，不算冲突
+    if orig != (d, code) and fetch(
+            f"SELECT db_code FROM mcp_datasource_config"
+            f" WHERE dir_path={ph} AND db_code={ph}", (d, code)):
+        return (f"已存在同目录同数据库名称的记录：目录={d!r}, 数据库名称={code!r}\n\n"
+                f"同一工作目录下，数据库名称不能重复。跨库查询请用 db_code.table 引用，"
+                f"或换一个数据库名称。")
+
+    # 2) 默认唯一。同样排除自己——否则"编辑一条本来就是默认的行"会误报
+    if v.get("default"):
+        rows = fetch(f"SELECT db_code FROM mcp_datasource_config"
+                     f" WHERE dir_path={ph} AND is_default=1", (d,))
+        others = sorted({norm(r[0]) for r in rows if orig != (d, norm(r[0]))})
+        if others:
+            return (f"目录 {d!r} 已有默认数据源：{', '.join(others)}\n\n"
+                    f"同一目录只能有一个默认数据源（MCP 取 db_code 字母序第一个，"
+                    f"多个默认会让\"哪个是默认\"没准）。\n"
+                    f"若要改用本条，请先把 {', '.join(others)} 的"
+                    f"「设为该目录默认数据源」取消勾选。")
+    return ""
+
+
 def _sqlite_connect():
     """连接 SQLite 配置库；文件不存在时自动建库建表（幂等）。
 

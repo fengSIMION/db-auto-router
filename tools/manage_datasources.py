@@ -150,6 +150,15 @@ def cmd_add():
 
     conn = _connect()
     try:
+        # v4.9：保存前预检（目录+名称唯一、同目录默认唯一）。与 GUI 共用同一份规则，
+        # 见 db_auto_router.datasources.check_datasource_conflict
+        from db_auto_router.datasources import check_datasource_conflict
+        err = check_datasource_conflict(
+            lambda sql, p: conn.execute(sql, p).fetchall(), None,
+            {"dir": dir_path, "code": db_code, "default": is_def})
+        if err:
+            print("❌ " + err.replace("\n\n", "\n   "))
+            return
         conn.execute(
             "INSERT INTO mcp_datasource_config "
             "(dir_path, db_name, db_code, db_type, conn_url, db_user, db_password, db_schema, is_default, write_confirm) "
@@ -202,13 +211,26 @@ def cmd_del(db_code, dir_path="*"):
 
 def cmd_template():
     conn = _connect()
+    # v4.9：示例行原本写死 is_default=1，而 '*' 目录往往已经有默认数据源——插进去
+    # 就是同一目录两个默认，MCP 会 silently 取字母序第一个，用户勾的那个不算数。
+    # 撞了就退成 is_default=0 并说明，示例行照样插得进去
+    from db_auto_router.datasources import check_datasource_conflict
+    is_def = 1
+    err = check_datasource_conflict(
+        lambda sql, p: conn.execute(sql, p).fetchall(), None,
+        {"dir": "*", "code": "mydb", "default": 1})
+    if err and "已有默认数据源" in err:
+        is_def = 0
     conn.execute(
         "INSERT OR IGNORE INTO mcp_datasource_config "
         "(dir_path, db_name, db_code, db_type, conn_url, db_user, db_password, db_schema, is_default, write_confirm) "
-        "VALUES ('*', '示例数据源', 'mydb', 'mysql', '127.0.0.1:3306', 'root', '改成你的密码', '', 1, 1)")
+        "VALUES ('*', '示例数据源', 'mydb', 'mysql', '127.0.0.1:3306', 'root', '改成你的密码', '', ?, 1)",
+        (is_def,))
     conn.commit()
     conn.close()
     print("✅ 已插入兜底示例行（db_code=mydb，占位密码）。")
+    if not is_def:
+        print("   ℹ️ '*' 目录已有默认数据源，示例行按非默认插入（同一目录只允许一个默认）。")
     print("   用 DB Browser (SQLite) 打开 datasources.db，把 conn_url/db_user/db_password 改成你的数据库即可；")
     print("   或运行: python manage_datasources.py del mydb 删掉后重新 add。")
 

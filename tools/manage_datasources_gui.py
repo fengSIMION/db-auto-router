@@ -1,8 +1,41 @@
 # -*- coding: utf-8 -*-
-"""数据源维护可视化小工具（v4.7 双后端版）
+"""数据源维护可视化小工具（v4.9 双后端版）
 
 用法：python tools/manage_datasources_gui.py 或双击 start_datasource_manager.bat
 可加参数强制后端：--backend sqlite 或 --backend mysql（默认跟随 .env 的 MCP_CONFIG_MODE）
+
+v4.9 变更：
+- 窗口标题 / 弹窗横幅 / 状态栏改显示短描述（新增 backend.desc_short）：
+  SQLite 只显示「SQLite 数据库：datasources.db」，不再顶一长条全路径——标题栏和
+  横幅是单行标签，全路径只会被截断。全路径 desc 原样留给诊断类弹窗（读取失败、
+  无法连接、一键初始化询问、刷新完成、删除确认），那些会换行，路径越完整越容易
+  定位"连的到底是哪个库"
+- 保存前预检两条规则，命中就拒绝保存并把原因说清楚（GUI 与 CLI 共用同一份实现，
+  见 db_auto_router.datasources.check_datasource_conflict）：
+    1) 同一工作目录下，数据库名称不能重复
+    2) 同一目录只能有一个默认数据源
+  第 2 条以前完全没有校验，而 MCP 取默认的口径是 is_default DESC, db_code——
+  多个默认时字母序第一个胜出，用户在 B 上勾"设为默认"、界面也打了勾，实际生效的
+  却是 A，且不报错。数据库主键继续兜底并发/外部改库的场景
+- 命令行 template 子命令：示例行原本写死 is_default=1，'*' 目录已有默认时会插出
+  同一目录两个默认；撞了自动退成非默认并说明
+
+v4.8 变更：
+- 列表不再展示 Schema/Owner 列：它对绝大多数 MySQL 数据源是空值，却常年占着
+  一列的宽度。字段本身不动，「编辑」弹窗里照样能改（PG/GaussDB/Oracle/达梦才填）
+- 列宽改为「内容自适应」：按当前数据实测每一列的文本像素宽，窗口多余空间再按
+  权重分给可伸缩列；窗口不够时由水平滚动条兜底，不再把列挤成看不见
+- 修复「拖不动列宽」：旧实现在每次 <Configure> 里把按权重算好的宽度强写回每一列，
+  用户手工拖出来的宽度会被下一次事件抹掉。现在手工拖过的列会被记住，不再自动改，
+  点「重置列宽」可恢复自适应
+- 新增「复制」按钮：复制选中数据源，工作目录名后加 _copy（数据库名称不变）——
+  副本是"给另一个目录用的同一套连接参数"
+- 同目录同色：列表按 dir_path 排序，同项目的数据源本就挨在一起，一个浅色底就是
+  一个项目分组，一眼看出哪几条属于同一个项目。只有一个目录时（全是 * 兜底）
+  着色没有区分意义，退回原来的隔行浅蓝
+- 修复「编辑/复制弹窗里长路径看不全」：所有输入框原为固定 width=30，一条 63 字符的
+  目录路径有一半以上挡在框外。改为按当前取值实测像素宽设定（封顶 72 字符），
+  弹窗整体仍受 90% 屏宽上限约束
 
 v4.7 变更（小白向）：
 - 底部状态栏「共 N 条」行尾展示 MCP 版本号
@@ -45,6 +78,7 @@ from db_auto_router import config as cfg  # noqa: E402
 # 这笔钱挪到后台线程的数据加载里付，用户先看到窗口。
 import tkinter as tk  # noqa: E402
 from tkinter import ttk, messagebox  # noqa: E402
+from tkinter import font as tkfont  # noqa: E402  列宽内容实测：measure 文本像素宽
 
 VALID_TYPES = ("mysql", "dm", "postgres", "gaussdb", "oracle")
 PIP_PKGS = {"mysql": "mysql-connector-python", "dm": "dmPython",
@@ -138,6 +172,16 @@ class SqliteBackend:
         return f"SQLite 本地文件 {self.path}"
 
     @property
+    def desc_short(self):
+        """窗口标题/弹窗横幅/状态栏用的短描述：只留文件名，不带全路径。
+
+        全路径留给诊断类提示（读取失败、刷新完成、删除确认、一键初始化）——那些是
+        弹窗、会换行，路径越完整越容易定位"到底连的是哪个库"（换机器拷贝文件夹后
+        尤其如此）。而标题栏和横幅是单行标签，全路径只会被截断，看着还是一长条。
+        """
+        return f"SQLite 数据库：{Path(self.path).name}"
+
+    @property
     def desc_color(self):
         return "#1B5E9E"   # 蓝色
 
@@ -182,6 +226,14 @@ class SqliteBackend:
         """orig=None 新增；否则 (dir, code) 为旧行主键。返回 (ok, 错误信息)"""
         c = self._conn()
         try:
+            # v4.9：保存前预检（目录+名称唯一、同目录默认唯一）。规则在
+            # datasources.check_datasource_conflict 只写一份，GUI 与 CLI 共用。
+            # 走已打开的连接，不额外开连接；主键约束继续兜底
+            from db_auto_router.datasources import check_datasource_conflict
+            err = check_datasource_conflict(
+                lambda sql, p: c.execute(sql, p).fetchall(), orig, v)
+            if err:
+                return False, err
             if orig is None:
                 c.execute("INSERT INTO mcp_datasource_config (dir_path, db_name, db_code,"
                           " db_type, conn_url, db_user, db_password, db_schema, is_default,"
@@ -248,6 +300,11 @@ class MysqlBackend:
     @property
     def desc(self):
         return f"MySQL 配置库 {self.host}:{self.port}/{self.db}"
+
+    @property
+    def desc_short(self):
+        # MySQL 的 desc 本来就是"主机:端口/库名"，够短，不需要再缩
+        return self.desc
 
     @property
     def desc_color(self):
@@ -352,6 +409,17 @@ class MysqlBackend:
         c = self._conn()
         try:
             cur = c.cursor()
+            # v4.9：保存前预检，同 SqliteBackend。占位符换成就近的 %s，
+            # 规则本身仍在 datasources.check_datasource_conflict 那一份里
+            from db_auto_router.datasources import check_datasource_conflict
+
+            def _fetch(sql, params):
+                cur.execute(sql, params)
+                return cur.fetchall()
+
+            err = check_datasource_conflict(_fetch, orig, v, ph="%s")
+            if err:
+                return False, err
             sql_set = ("dir_path=%s, db_name=%s, db_code=%s, db_type=%s, conn_url=%s,"
                        " db_user=%s, db_password=%s")
             vals = (v["dir"], v["name"], v["code"], v["type"], v["url"],
@@ -622,7 +690,7 @@ class RecordDialog(tk.Toplevel):
 
         # ★ v4.2 写入目标标注：明确告知本次修改落在哪个配置库
         banner = tk.Label(
-            self, text=f"当前修改写入：{backend.desc}",
+            self, text=f"当前修改写入：{backend.desc_short}",
             font=("Microsoft YaHei UI", 10, "bold"),
             fg=backend.desc_color, bg="#FFF7E6" if backend.kind == "mysql" else "#EAF3FB",
             anchor="w", padx=16, pady=8)
@@ -671,10 +739,21 @@ class RecordDialog(tk.Toplevel):
                     .grid(row=r + 1, column=1, sticky="w", pady=(0, 4))
             return r + (2 if hint else 1)
 
+        # 输入框宽度按当前取值算：编辑一条 63 字符的路径时，固定 width=30 会把一大半
+        # 挡在框外，只能按方向键一点点蹭过去看（列表里早就能完整显示，弹窗反而看不清）。
+        # ttk 的 Entry width 以字符 '0' 的宽度为单位，故用像素宽换算。封顶 72 字符，
+        # 更长的交给方向键 / Home-End；弹窗整体仍受 _center_on 的 90% 屏高屏宽上限约束
+        f_entry = tkfont.Font(font=self.F)
+        unit = f_entry.measure("0") or 1
+
+        def entry_w(val):
+            return max(30, min(72, int((f_entry.measure(str(val)) + 28) / unit) + 1))
+
         widgets["type"] = ttk.Combobox(frm, textvariable=self.var["type"],
                                        values=list(VALID_TYPES), state="readonly",
                                        width=15, font=self.F)
-        ent_pwd = ttk.Entry(frm, textvariable=self.var["pwd"], width=30,
+        ent_pwd = ttk.Entry(frm, textvariable=self.var["pwd"],
+                            width=entry_w(self.var["pwd"].get()),
                             font=self.F, show="*")
         for key in order:
             if key == "type":
@@ -687,7 +766,8 @@ class RecordDialog(tk.Toplevel):
                     .grid(column=1, sticky="w")
             else:
                 add(labels[key], ttk.Entry(frm, textvariable=self.var[key],
-                                           width=30, font=self.F), hints.get(key))
+                                           width=entry_w(self.var[key].get()),
+                                           font=self.F), hints.get(key))
         ttk.Checkbutton(frm, text="设为该目录默认数据源", variable=self.var_def)\
             .grid(column=1, sticky="w", pady=(8, 0))
         self.chk_confirm = ttk.Checkbutton(frm, text="写操作需人工审核",
@@ -761,17 +841,43 @@ class RecordDialog(tk.Toplevel):
 
 
 class App(tk.Tk):
-    HEADS = ("目录", "项目名称", "数据库名称", "类型", "地址", "用户", "Schema/Owner", "默认", "审核")
-    # 列宽 = [最小宽度, 权重]：窗口拉伸时按权重分配多余空间
-    COLS = {"目录":       (280, 5),
-            "项目名称":   (120, 1),
-            "数据库名称": (120, 1),
+    # 列表列。v4.8 起不再展示 Schema/Owner：它只对 PG/GaussDB/Oracle/达梦有意义，
+    # MySQL 数据源这一列恒为空，却常年占着一列宽度。字段本身没动，「编辑」弹窗
+    # 里照样能改——只是不再占列表的地方。
+    HEADS = ("目录", "项目名称", "数据库名称", "类型", "地址", "用户", "默认", "审核")
+    # 列宽 = [最小宽度, 伸缩权重]：宽度先按内容实测（见 _natural_width），窗口多余的
+    # 空间再按权重分给权重>0 的列；权重 0 的列（类型/默认/审核）恒为内容宽度，不伸缩
+    COLS = {"目录":       (140, 5),
+            "项目名称":   (90,  1),
+            "数据库名称": (110, 1),
             "类型":       (70,  0),
-            "地址":       (150, 2),
-            "用户":       (90,  1),
-            "Schema/Owner": (110, 1),
+            "地址":       (130, 2),
+            "用户":       (80,  1),
             "默认":       (50,  0),
             "审核":       (70,  0)}
+    # 内容实测宽度的上限。这个帽子只是"别让一列把表格撑爆"的保险丝，不是截断用的——
+    # 真实项目路径普遍 50~70 字符（开启 DPI awareness 后约 500~700px），所以目录列
+    # 放到 1000px 仍装得下绝大部分真实路径，超出的才是真异常，交给水平滚动条与手工拖宽。
+    # 曾经给目录列设 620px，结果两条 63 字符的路径被切——"内容自适应"却自带截断，
+    # 等于没做。测试必须走 main() 的真实路径（带 DPI awareness），否则测出来的
+    # 文本像素宽比真实渲染窄一大截，会漏掉这类问题
+    MAXW = {"目录": 1000, "项目名称": 300, "数据库名称": 300, "类型": 100,
+            "地址": 400, "用户": 200, "默认": 60, "审核": 90}
+    # 同目录同色用的浅色底（低饱和：黑字/默认行绿字/免审核橙字压在上面都读得清）。
+    # 第一个就是原来的隔行蓝，单目录退回 zebra 时观感和之前完全一致。
+    # 颜色数量只是"几个项目后开始循环"，相邻两组异色靠 _dir_colors 的顺序分配保证，
+    # 与用掉几个颜色无关
+    DIR_COLORS = ("#EBF1F9",   # 浅蓝
+                  "#F1EBF9",   # 浅紫
+                  "#EAF6EE",   # 浅绿
+                  "#FCF1DC",   # 浅黄
+                  "#F7EAEA",   # 浅红
+                  "#E3F0EF",   # 浅青
+                  "#EFEFEF")   # 浅灰
+    # 内容实测时"文本之外的富余"候选值，从宽到紧。_autofit 取第一个能让总宽塞进可视区的，
+    # 所以列宽自适应内容、又不会因为太松而挤出水平滚动条。ttk 单元格内边距实测约 3px，
+    # 下限取 6 仍有余量——调小 pad 只会让列紧一点，不会截断文本
+    PAD_CHOICES = (24, 18, 14, 10, 8, 6)
 
     def __init__(self, backend):
         super().__init__()
@@ -779,7 +885,7 @@ class App(tk.Tk):
         # 再被 geometry() 拉伸，启动时会看到"小框闪一下再展开"
         self.withdraw()
         self.backend = backend
-        self.title(f"数据源管理 · db-auto-router 【{backend.desc}】")
+        self.title(f"数据源管理 · db-auto-router 【{backend.desc_short}】")
         self._rows = []
         self._first = not os.path.exists(backend.path) if backend.kind == "sqlite" else False
 
@@ -797,7 +903,6 @@ class App(tk.Tk):
 
         if sys.platform == "win32":
             try:
-                import tkinter.font as tkfont
                 for f in ("TkDefaultFont", "TkTextFont", "TkHeadingFont"):
                     tkfont.nametofont(f).configure(family="Microsoft YaHei UI", size=9)
             except Exception:
@@ -814,11 +919,26 @@ class App(tk.Tk):
         style.map("Treeview", background=[("selected", "#2F6FDB")],
                   foreground=[("selected", "#FFFFFF")])
 
+        # 列宽管理状态（v4.8 内容自适应）。三份字典分工：
+        #   _natural     —— 本次数据算出来的内容宽度，基准值
+        #   _user_widths —— 用户手工拖过的列宽，拖过就不再自动改，直到「重置列宽」
+        #   _applied     —— 代码上一次写入的列宽，用于识别"这次变宽是用户拖的"
+        self._natural = {}
+        self._user_widths = {}
+        self._applied = {}
+        self._display = []          # 表格里实际显示的值（列宽实测的输入）
+        self._laid_out = False      # 是否已完成过一次布局（否则无法区分拖动与初值）
+        self._border = 0            # ttk 边框占掉的像素，实测得到，见 _on_xscroll
+        self._w_cache = {}          # 文本像素宽记忆，见 _text_width
+        self._f_cell = tkfont.Font(font=("Microsoft YaHei UI", 10))
+        self._f_head = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
+
         bar = ttk.Frame(self, padding=12)
         bar.pack(fill="x")
-        for text, cmd in (("刷新数据源", self.on_refresh), ("添加", self.on_add),
-                          ("编辑", self.on_edit), ("删除", self.on_delete),
-                          ("测试连接", self.on_test), ("关闭", self.destroy)):
+        for text, cmd in (("刷新数据源", self.on_refresh), ("复制", self.on_copy),
+                          ("添加", self.on_add), ("编辑", self.on_edit),
+                          ("删除", self.on_delete), ("测试连接", self.on_test),
+                          ("重置列宽", self.on_reset_cols), ("关闭", self.destroy)):
             ttk.Button(bar, text=text, command=cmd, width=12).pack(side="left", padx=3)
 
         frame = ttk.Frame(self, padding=(12, 0, 12, 0))
@@ -828,18 +948,30 @@ class App(tk.Tk):
         for col in self.HEADS:
             minw, _weight = self.COLS[col]
             self.tree.heading(col, text=col)
-            # stretch=True + 随后按权重分配：窗口变化时列宽自适应
-            self.tree.column(col, width=minw, minwidth=minw, anchor="w", stretch=True)
+            # stretch=False：列宽完全交给 _layout_columns 管（内容实测 + 权重分配 +
+            # 记住手工拖拽）。原来 stretch=True 会让 ttk 自行拉伸，与按权重算出来的
+            # 宽度互相打架，也是"拖完又被拽回去"的成因之一
+            self.tree.column(col, width=minw, minwidth=minw, anchor="w",
+                             stretch=False)
+            self._applied[col] = minw
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
+        # 水平滚动条：列宽按内容算，窗口装不下时就该能横向滚到，而不是把列挤没
+        self.hsb = ttk.Scrollbar(frame, orient="horizontal", command=self.tree.xview)
+        self._hsb_shown = False
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=self._on_xscroll)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda e: self.on_edit())
         self.tree.bind("<Configure>", self._on_tree_resize)
+        # 手工拖列：松手时拿当前宽度和"代码上次写入的宽度"对比，变了的就是用户拖的
+        self.tree.bind("<ButtonRelease-1>", self._on_click_release)
         # 隔行浅蓝底（zebra）+ 默认数据源整行绿字 + 免人工审核整行橙字（v4.6）
         self.tree.tag_configure("zebra", background="#EBF1F9")
         self.tree.tag_configure("default_row", foreground="#1E7B34")
         self.tree.tag_configure("no_confirm", foreground="#B35400")
+        # 同目录同色（v4.8）：一个浅色底 = 一个项目分组。全部预注册，用不到的无害
+        for _i, _c in enumerate(self.DIR_COLORS):
+            self.tree.tag_configure(f"dir{_i}", background=_c)
 
         self.status = ttk.Label(self, text="", padding=12, foreground="#555")
         self.status.pack(fill="x", side="bottom")
@@ -848,23 +980,188 @@ class App(tk.Tk):
         # mainloop() 之前，窗口要等它们跑完才出现——这是"半天才弹出来"的直接原因。
         self.reload(async_=True)
 
+    # ---- v4.8 列宽：内容自适应 + 手工拖拽不被抹掉 ----
+
+    @staticmethod
+    def _dir_key(d):
+        """目录分组键：'*' 与空串是同一个意思（任意目录兜底），必须归成同一组。
+
+        否则配置里同时有这两行时，排序后它们挨在一起却是两个颜色，看起来像两个项目。
+        """
+        return "*" if (d or "").strip() in ("*", "") else d
+
+    def _dir_colors(self, dir_keys):
+        """给每个不同目录分配一个浅色底；相邻目录颜色必不相同。
+
+        按出现顺序依次取下一个颜色（循环）。列表按 dir_path 排过序，所以相邻两组
+        一定异色——分组边界一眼能看出来。同一个目录永远拿同一个颜色，刷新、滚动、
+        增删行之后都不会跳色（这点比"按行号取色"重要：按行号的话删一行后半段的颜色
+        全变，刚才记住的分组就乱了）。
+        """
+        out = {}
+        prev = -1
+        for k in dict.fromkeys(dir_keys):        # dict.fromkeys 保序去重
+            i = (prev + 1) % len(self.DIR_COLORS)
+            out[k] = i
+            prev = i
+        return out
+
+    def _text_width(self, text, bold=False):
+        """文本像素宽（列宽实测用）。测量失败时按字符数粗估，不至于让布局崩掉。
+
+        带记忆：类型/用户/审核这几列的取值高度重复，几百行配置实测时能省掉大量
+        重复的 measure() Tcl 往返。路径列取值基本不重复，命中不了缓存，也无妨。
+        """
+        key = (text, bold)
+        hit = self._w_cache.get(key)
+        if hit is not None:
+            return hit
+        f = self._f_head if bold else self._f_cell
+        try:
+            w = f.measure(text)
+        except Exception:
+            w = len(str(text)) * 8
+        self._w_cache[key] = w
+        return w
+
+    def _natural_width(self, idx, col, pad):
+        """一列的内容宽度 = max(表头宽, 各行取值宽) + pad，夹在 [最小, 上限] 之间。
+
+        pad 是"文本之外的富余"，由 _autofit 按能否塞进可视区挑选（见 PAD_CHOICES）。
+        真正决定放不放得下内容的是 ttk 那约 3px 的单元格内边距，pad 只要 ≥3 就不会截断，
+        所以这里怎么调都安全——调小只是列变紧一点。
+        """
+        w = self._text_width(col, bold=True) + pad + 8   # 表头文字 + 排序箭头
+        for row in self._display:
+            w = max(w, self._text_width(row[idx]) + pad)
+        minw, _weight = self.COLS[col]
+        return max(minw, min(w, self.MAXW[col]))
+
+    def _autofit(self):
+        """按当前数据重算每一列的内容宽度（用户手工拖过的列除外），再排布一次。
+
+        富余边距 pad 从宽到紧逐个试，取第一个能让总宽塞进可视区的：内容本来就装得下时
+        用最松的（列好看），装不下时收紧空白而不是切文本——所以永远不会出现"自适应
+        却把内容截断"。收到最紧凑仍塞不下（真·超宽内容），保留最紧凑值，超出的部分
+        交给水平滚动条，或用户手工把列拖宽。
+        """
+        trial = None
+        for pad in self.PAD_CHOICES:
+            trial = {c: self._natural_width(i, c, pad)
+                     for i, c in enumerate(self.HEADS) if c not in self._user_widths}
+            total = sum(self._user_widths.get(c, trial.get(c, self.COLS[c][0]))
+                        for c in self.HEADS)
+            if total <= self.tree.winfo_width() - self._border:
+                break
+        self._natural = trial or {}
+        self._layout_columns()
+
     def _on_tree_resize(self, event):
-        """表格宽度变化时按权重重新分配列宽（字段自适应布局）。
-        目录列吃大头（长路径），地址其次，类型/默认列固定不参与伸缩。"""
-        total = event.width - 24          # 扣除垂直滚动条宽度
-        weights = [self.COLS[c][1] for c in self.HEADS]
-        mins = [self.COLS[c][0] for c in self.HEADS]
-        fixed_total = sum(mins)
-        extra = total - fixed_total
+        """表格尺寸变化时重算列宽（内容自适应布局）。
+
+        与旧实现的区别：旧代码在每次 <Configure> 里把按权重分配的宽度强写回每一列，
+        用户手工拖出来的宽度会被下一次事件直接抹掉——这就是"拖不动列宽"的直接原因。
+        现在以 _natural（内容实测）/ _user_widths（用户拖过）为基准，只在有剩余空间时
+        把余量按权重分给可伸缩列；空间不足时不动宽度，交给水平滚动条。
+        """
+        self._layout_columns()
+
+    def _layout_columns(self):
+        """内容宽度为基准 + 余量按权重分给可伸缩列，正好填满表格。
+
+        宽度只会"长"不会被压到内容宽度以下：压不下去就横向滚，这是用户能看见长目录的
+        前提。整数除法的余数补给最后一个可伸缩列，避免右侧留一条空带。
+        """
+        # winfo_width() 含 ttk 边框，直接拿它当基准会把列宽填到溢出边框那几个像素，
+        # 白闪一条用不上的水平滚动条。减掉实测出来的 _border 才是真正的可视宽度。
+        avail = self.tree.winfo_width() - self._border
+        if avail <= 1:                    # 窗口还没映射完，等 <Configure> 再来
+            return
+        widths = []
+        for col in self.HEADS:
+            if col in self._user_widths:
+                widths.append(self._user_widths[col])
+            else:
+                widths.append(self._natural.get(col, self.COLS[col][0]))
+        extra = avail - sum(widths)
         if extra > 0:
-            wsum = sum(weights)
+            wsum = sum(self.COLS[c][1] for c in self.HEADS)
             if wsum > 0:
-                mins = [m + extra * wt // wsum for m, wt in zip(mins, weights)]
-        # 防抖：与当前列宽相同则跳过重设
-        cur = [self.tree.column(c)["width"] for c in self.HEADS]
-        if cur != mins:
-            for col, wd in zip(self.HEADS, mins):
-                self.tree.column(col, width=wd)
+                flex = [i for i, c in enumerate(self.HEADS)
+                        if self.COLS[c][1] > 0 and c not in self._user_widths]
+                if flex:
+                    fsum = sum(self.COLS[self.HEADS[i]][1] for i in flex)
+                    given = 0
+                    for i in flex[:-1]:
+                        add = extra * self.COLS[self.HEADS[i]][1] // fsum
+                        widths[i] += add
+                        given += add
+                    widths[flex[-1]] += extra - given
+        # _applied 要先于"相同就跳过"的判断更新：否则一次不写回的布局会让
+        # _applied 停留在旧值，用户下次点击就被误判成拖拽
+        for col, wd in zip(self.HEADS, widths):
+            self._applied[col] = wd
+        self._laid_out = True
+        if [self.tree.column(c)["width"] for c in self.HEADS] == widths:
+            return
+        for col, wd in zip(self.HEADS, widths):
+            # 双保险取整：widths 全链路是整数运算，但 _user_widths / _natural 是外部
+            # 写入的字典，混进浮点会让 Tcl 抛 "expected integer"，整个布局中断在半路
+            self.tree.column(col, width=int(round(wd)))
+
+    def _on_click_release(self, event):
+        """松手时识别手工拖列：与代码上次写入的宽度不同的列记下来，此后不再自动改。"""
+        if not self._laid_out:
+            return                     # 还没排布过，当前宽度只是初始最小值，不算用户拖的
+        for col in self.HEADS:
+            cur = self.tree.column(col)["width"]
+            if self._applied.get(col) != cur:
+                self._user_widths[col] = cur
+
+    def _on_xscroll(self, first, last):
+        """水平滚动条回调：同步滑块，实测边框宽度，并按需显隐滚动条本身。
+
+        显隐只改 frame 内的纵向排布，不影响 tree 的宽度，所以不会触发新的 <Configure>
+        回来重算列宽（没有重入循环）。pack 操作用 after_idle 推迟：这个函数是在滚动条
+        更新的 C 回调里被叫到的，直接改布局有重入风险。
+
+        为什么要实测 _border：Tk 滚动条协议的 first/last 是文档像素占比，于是内容
+        **溢出**时 (last-first) * 总列宽 就是表格真正的可视宽度，与 winfo_width() 的
+        差值正是 ttk 边框。winfo_width() 含边框，直接拿它当排布基准会把列宽填到溢出
+        边框那几个像素，闪出一条根本用不上的水平滚动条。内容没溢出时 Tk 一律报
+        (0, 1)，此时反算出来的是"总列宽"而非可视宽度，不能采信——所以只在 last < 1
+        （确实溢出了）时测量。测到新值就重排一次，让列宽按真实可视宽度收敛。
+        """
+        if self.hsb is not None:
+            self.hsb.set(first, last)
+        total = sum(self.tree.column(c)["width"] for c in self.HEADS)
+        first, last = float(first), float(last)
+        if total > 0 and last < 1.0 and last > first:
+            border = self.tree.winfo_width() - (last - first) * total
+            # 取整：列宽必须是整数，Tcl 不认 "432.0"。这一处若漏了取整，avail 会变成
+            # 浮点、算出浮点列宽，tree.column() 当场抛 TclError 把整个布局中断在半路，
+            # 留下上一轮的旧宽度——看起来就像"列宽突然全乱了"
+            if abs(border - self._border) > 0.5:
+                self._border = max(0, int(round(border)))
+                self.after_idle(self._layout_columns)      # 按真实可视宽度重排收敛
+        # need 放在边框更新之后算：边框一变可视宽度就变，用旧值判断会慢一拍
+        need = total > self.tree.winfo_width() - self._border + 1
+        if need != self._hsb_shown:
+            self.after_idle(self._toggle_hsb, need)
+
+    def _toggle_hsb(self, need):
+        if need == self._hsb_shown or self.hsb is None:
+            return
+        if need:
+            self.hsb.pack(side="bottom", fill="x")
+        else:
+            self.hsb.pack_forget()
+        self._hsb_shown = need
+
+    def on_reset_cols(self):
+        """重置列宽：忘掉手工拖过的宽度，恢复按当前内容自适应。"""
+        self._user_widths.clear()
+        self._autofit()
 
     def reload(self, async_=False):
         """读取配置源并刷新列表。
@@ -876,7 +1173,7 @@ class App(tk.Tk):
         """
         if async_:
             self.status.configure(foreground="#555",
-                                  text=f"正在连接 {self.backend.desc} …")
+                                  text=f"正在连接 {self.backend.desc_short} …")
             threading.Thread(target=self._reload_worker, daemon=True).start()
         else:
             self._reload_worker()
@@ -909,6 +1206,7 @@ class App(tk.Tk):
         """主线程：把读到的数据渲染进表格。problem 见 _reload_worker（mysql 错误归类）。"""
         for iid in self.tree.get_children():
             self.tree.delete(iid)
+        self._display = []
         if err is not None:
             self._rows = []
             # v4.7：区分「配置表/库还没建」与「连不上」——前者一键初始化，
@@ -933,23 +1231,36 @@ class App(tk.Tk):
                     "  · 用 --backend sqlite 编辑本地文件模式")
             return
         self._rows = rows
+        display = []
+        # 同目录同色：一个浅色底 = 一个项目分组。只有一个目录时（比如全是 * 兜底）
+        # 着色没有区分意义，退回隔行浅蓝，长列表仍读得舒服
+        color_of = self._dir_colors([self._dir_key(r[0]) for r in rows])
+        banded = len(color_of) > 1
         for i, (d, name, code, t, url, user, schema, isdef, wconf) in enumerate(self._rows):
             tags = []
-            if i % 2 == 0:
+            if banded:
+                tags.append(f"dir{color_of[self._dir_key(d)]}")
+            elif i % 2 == 0:
                 tags.append("zebra")
             if isdef == 1:
                 tags.append("default_row")
             if wconf != 1:
                 # 免审核行整行橙色：扫一眼就知道哪个库写操作不弹窗
                 tags.append("no_confirm")
-            self.tree.insert("", "end", iid=str(i), tags=tags,
-                             values=(d if d not in ("*", "") else "*（任意目录兜底）",
-                                     name, code, t, url, user, schema or "",
-                                     "✓" if isdef == 1 else "",
-                                     "✓" if wconf == 1 else "✗ 免"))
+            # v4.8：db_schema 不再进 values——列表不展示 Schema/Owner 列。
+            # self._rows 里仍保留该字段，编辑/测试/删除都按 9 元组解包，不受影响
+            vals = (d if d not in ("*", "") else "*（任意目录兜底）",
+                    name, code, t, url, user,
+                    "✓" if isdef == 1 else "",
+                    "✓" if wconf == 1 else "✗ 免")
+            display.append(vals)
+            self.tree.insert("", "end", iid=str(i), tags=tags, values=vals)
+        self._display = display
+        # 数据变了内容宽度就可能变（新增一行更长的路径），重算后再排布
+        self._autofit()
         self.status.configure(
             foreground="#555",
-            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ "
+            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ 同色=同一目录（项目）｜ "
                  f"保存后 MCP 下一次查询自动生效（秒级），无需调 refresh_datasources ｜ "
                  f"MCP 版本 v{cfg.MCP_SERVER_INFO['version']}")
         if self._first:
@@ -1027,6 +1338,49 @@ class App(tk.Tk):
             messagebox.showinfo("提示", "请先选中一条数据源", parent=self)
             return None
         return self._rows[int(sel[0])]
+
+    def on_copy(self):
+        """复制选中数据源：除「工作目录」外全部沿用，目录名后加 _copy。
+
+        v4.8：主键是 (dir_path, db_code)，两边都照抄必然撞唯一约束，所以副本必须换个
+        身份。按既定做法 _copy 加在工作目录上（C:\\proj → C:\\proj_copy），数据库名称
+        不动——副本的用途是"给另一个目录用的同一套连接参数"，改完地址就能指向另一个库。
+
+        例外：源行的目录是兜底值 '*' 或空串时，'*_copy' 是一个永远匹配不到任何工作区的
+        死路径（dir_path 是精确匹配当前工作目录的，见 datasources._load_datasources_*）。
+        此时退回给数据库名称加 _copy、目录保持兜底值，并强制取消默认标记——同一目录下
+        两个 is_default=1 会让"哪个是默认"变没准。弹框说明原因，不做静默降级。
+        """
+        row = self._sel()
+        if not row:
+            return
+        d, name, code, t, url, user, schema, isdef, wconf = row
+        fallback = (d or "").strip() in ("*", "")
+        base = {"dir": d if fallback else d + "_copy",
+                "name": name,
+                "code": code + "_copy" if fallback else code,
+                "type": t, "url": url, "user": user, "schema": schema or "",
+                "pwd": self.backend.fetch_pwd(d, code),
+                "default": 0 if fallback else isdef,
+                "confirm": wconf}
+        if fallback:
+            messagebox.showinfo(
+                "复制说明",
+                f"源数据源「{code}」的工作目录是兜底值 {d!r}（任意目录生效）。\n\n"
+                f"若给它加 _copy 会得到 {d + '_copy'!r}——一个匹配不到任何工作区的死路径，\n"
+                f"所以本次改为复制出「{code}_copy」，工作目录仍为 {d!r}，并取消默认标记。\n\n"
+                f"保存后可在「编辑」弹窗里把工作目录改成目标项目路径。", parent=self)
+        vals = base
+        while True:
+            dlg = RecordDialog(self, f"复制数据源：{code}", self.backend, vals)
+            if not dlg.result:
+                return
+            ok, msg = self.backend.save_row(None, dlg.result)
+            if ok:
+                self.backend.bump_version()
+                return self.reload()
+            messagebox.showerror("复制失败", msg, parent=self)
+            vals = dlg.result
 
     def on_add(self):
         vals = None
@@ -1113,7 +1467,7 @@ def main():
             windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description="数据源管理 GUI（v4.6 双后端）")
+    ap = argparse.ArgumentParser(description="数据源管理 GUI（v4.9 双后端）")
     ap.add_argument("--backend", choices=("sqlite", "mysql"), default=None,
                     help="强制指定编辑的后端（默认跟随 .env 的 MCP_CONFIG_MODE）")
     args = ap.parse_args()
