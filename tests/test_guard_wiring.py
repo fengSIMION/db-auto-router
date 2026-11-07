@@ -148,3 +148,35 @@ def test_txn_read_marks_exempt(monkeypatch):
     r = asyncio.run(tools.query("SELECT 1", txn_id="t1", ctx=None))
     assert r["read_only_enforced"] is False and "事务" in r["note"]
     assert touched == []                   # 事务路径没有去开只读
+
+
+# ---- Task 5：第三层接入 export_csv + explain_query 豁免标注 -------------
+
+def test_export_csv_pooled_path_enforces(monkeypatch, tmp_path):
+    c = RowConn(rows=2)
+    # csvio 有自己对 get_connection/put_connection 的引用，必须 patch 它这份
+    monkeypatch.setattr(csvio, "get_connection", lambda ds, db=None: c)
+    monkeypatch.setattr(csvio, "put_connection", lambda ds, conn, db=None: None)
+    out = csvio.export_csv_impl("SELECT * FROM t", str(tmp_path / "o.csv"), MY_DS, "x")
+    assert out["read_only_enforced"] is True
+    assert any("START TRANSACTION READ ONLY" in s for s in c.executed)
+
+
+def test_export_csv_direct_path_field(monkeypatch, tmp_path):
+    """timeout 覆盖走专用连接：用完即关，不做恢复；字段如实标 false。"""
+    c = RowConn(rows=2)
+    monkeypatch.setattr(csvio, "_open_direct_connection_with_timeout", lambda *a, **k: c)
+    out = csvio.export_csv_impl("SELECT * FROM t", str(tmp_path / "o.csv"),
+                                MY_DS, "x", timeout=60)
+    assert out["read_only_enforced"] is False
+    assert c.closed is True
+
+
+def test_explain_marks_exempt(monkeypatch):
+    async def fake_resolve(db_code):
+        return {"sources": {}, "db_code": "x", "ds": MY_DS}
+    monkeypatch.setattr(tools, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(tools.workspace, "_resolve_datasource", fake_resolve)
+    monkeypatch.setattr(tools, "explain_query_impl", lambda *a, **k: {"plan": "x"})
+    r = asyncio.run(tools.explain_query("SELECT 1", ctx=None))
+    assert r["read_only_enforced"] is False and "PLAN_TABLE" in r["note"]

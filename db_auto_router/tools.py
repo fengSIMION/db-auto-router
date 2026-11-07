@@ -619,6 +619,11 @@ async def explain_query(sql: str, db_code: Optional[str] = None, analyze: bool =
         validate_read_statement_ast(sql, resolved["ds"].get("db_type", ""))
         result_data = await _run_db(explain_query_impl, sql, resolved["ds"],
                                     resolved["db_code"], analyze, fmt)
+        if isinstance(result_data, dict):
+            # 第三层对 EXPLAIN 豁免：Oracle/达梦的 EXPLAIN PLAN FOR 要写 PLAN_TABLE，
+            # 只读事务里必报错。一二层照旧，此处如实标注
+            result_data.update(readonly_field(
+                resolved["ds"].get("db_type", ""), False, exempt_reason="explain"))
         audit_log("explain_query", resolved["db_code"], sql, status="ok",
                   execution_time_ms=result_data.get("execution_time_ms"),
                   detail=f"mode={result_data.get('mode')};verdict={result_data.get('verdict')}")

@@ -13,7 +13,8 @@ from .config import (EXPORT_BATCH, EXPORT_MAX_ROWS, IMPORT_BATCH,
                      READ_TIMEOUT, QUERY_TIMEOUT_MAX, clamp_override)
 from .directconn import _open_direct_connection_with_timeout, _set_conn_autocommit
 from .errutil import safe_cursor
-from .pool import get_connection, put_connection
+from .pool import get_connection, put_connection, pool_key_for
+from .readonly import enable_read_only, release_read_only, readonly_field
 from .sqlguard import validate_read_only_sql
 from .sqlparse import validate_read_statement_ast
 from .util import extract_db_and_table_from_sql, parse_cross_db_table, sql_placeholders
@@ -40,12 +41,20 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
     # timeout 是调用方（模型）可传的参数，与 query 同一套硬顶口径。
     # 保留原来的"传了就走专用连接"分支不变，只把连接上的超时值换成夹过的值。
     effective_timeout, timeout_clamped = clamp_override(timeout, READ_TIMEOUT, QUERY_TIMEOUT_MAX)
+    dialect = ds.get("db_type", "").lower().strip()
+    # 直连分支不设这两个值（用完即关，无需恢复），故先初始化
+    ro_key = None
+    ro_enforced = False
     if timeout and timeout > 0:
         conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, effective_timeout)
         conn_is_direct = True
     else:
         conn = get_connection(ds, target_db if is_cross_db else None)
         conn_is_direct = False
+        # 第三层：数据库只读兜底（与 query 同一道门）。直连分支不开——
+        # 它用完即关，没有"标记泄漏给下一个借用者"的风险
+        ro_key = pool_key_for(ds, target_db if is_cross_db else None)
+        ro_enforced = enable_read_only(conn, dialect, ro_key)
 
     # EXPORT_MAX_ROWS 本来就是防爆盘的硬顶，但 max_rows 参数能把它覆盖到更大，
     # 等于没有顶。天花板取 EXPORT_MAX_ROWS 自身：参数只能往下调。
@@ -97,11 +106,12 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
             "truncated": truncated,
             "truncated_at": cap if truncated else None,
             "execution_time_ms": execution_time_ms,
-            "dialect": ds.get("db_type", "").lower().strip(),
+            "dialect": dialect,
             "message": f"已导出 {total} 行到 {out_path}" + (f"（达到上限 {cap} 行，已截断）" if truncated else "")
         }
         if cap_warning:
             result["warning"] = cap_warning
+        result.update(readonly_field(dialect, ro_enforced))
         return result
     finally:
         # 失败/中断路径清掉半截文件，绝不留一个看起来像完整导出的 .part
@@ -117,7 +127,12 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
                 pass
         else:
             # 借出的池连接必须归还（导出可能跑数分钟，久到被空闲清理盯上）
-            put_connection(ds, conn, target_db if is_cross_db else None)
+            # 恢复必须先于归还，理由同 readengine
+            if ro_enforced and not release_read_only(conn, dialect, ro_key, ds,
+                                                     target_db if is_cross_db else None):
+                conn = None      # 恢复失败：连接已弃，MUST NOT 回池
+            if conn is not None:
+                put_connection(ds, conn, target_db if is_cross_db else None)
 
 
 def _quote_identifier(name: str) -> str:
