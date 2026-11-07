@@ -26,6 +26,7 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 | `MCP_CONNECT_TIMEOUT` | `10` | 连接超时（秒） |
 | `MCP_READ_TIMEOUT` | `30` | 读取超时（秒） |
 | `MCP_READ_GUARD_AST` | `on` | 只读通道第二层（sqlglot AST 校验）总开关；`off` = 只剩正则守卫与数据库只读两层。sqlglot 未安装时该层自动关闭，并在返回值 `note` 里说明 |
+| `MCP_READONLY_DB_GUARD` | `on` | 只读通道第三层（数据库只读兜底）总开关；`off` = 只剩前两层。库不认只读语法时该层自动关闭，并在返回值 `note` 里说明 |
 | `MCP_QUERY_TIMEOUT_MAX` | `600` | **超时硬顶（秒）**：`query` / `export_csv` 的 `timeout` 参数不许超过它，超顶夹回并在返回值 `warning` 里说明 |
 | `MCP_MAX_RESULT_ROWS` | `1000` | 无 LIMIT 时的最大返回行数（截断） |
 | `MCP_QUERY_MAX_ROWS_CAP` | `50000` | **行数硬顶**：`query` 的 `max_rows` 参数不许超过它，超顶夹回并在 `warning` 里说明；要更大结果集请用 `export_csv` 落文件 |

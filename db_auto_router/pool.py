@@ -303,3 +303,24 @@ def checkout(ds: Dict[str, str], target_db: str = None):
         yield conn
     finally:
         put_connection(ds, conn, target_db)
+
+
+def pool_key_for(ds: Dict[str, str], target_db: str = None) -> str:
+    """公开的连接池 key 计算——只读层按连接身份缓存能力，与池同口径。"""
+    return _make_pool_key(ds, target_db)
+
+
+def discard_connection(ds: Dict[str, str], conn, target_db: str = None) -> None:
+    """关闭一条不应回池的连接，并释放它的借出名额。
+
+    只读层的 PG 分支恢复失败时用：连接带着 default_transaction_read_only=on
+    回池，下一个借用者（可能是 execute）直接写库失败。名额必须释放，
+    否则池容量计数被永久占住。
+    """
+    if conn is None:
+        return
+    pool_key = _make_pool_key(ds, target_db)
+    safe_close(conn)
+    with _lock:
+        _release_slot_locked(pool_key, conn)
+    logger.info(f"连接已弃（不回池）: {pool_key}")

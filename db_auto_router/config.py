@@ -149,6 +149,9 @@ WRITE_SQL_PREFIXES = {"INSERT", "DELETE", "UPDATE", "DROP", "TRUNCATE", "ALTER",
 
 # 只读通道第二层（sqlglot AST 校验）总开关。on=启用；off=只剩正则守卫与数据库只读两层
 AST_GUARD = os.environ.get("MCP_READ_GUARD_AST", "on").strip().lower()
+# 只读通道第三层（数据库只读兜底）总开关。on=启用；off=只剩前两层。
+# 库不认只读语法时该层自动关闭（能力缓存）并在返回值 note 说明，与开关无关
+READONLY_DB_GUARD = os.environ.get("MCP_READONLY_DB_GUARD", "on").strip().lower()
 
 # MCP 服务器信息
 # version 会在 initialize 响应里上报给客户端，也是启动 banner 的版本号——
