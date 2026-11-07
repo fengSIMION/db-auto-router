@@ -32,6 +32,7 @@ from .util import normalize_path
 from .sqlguard import (split_sql_statements, is_ddl_operation,
                        validate_read_only_sql, is_provably_read_only, is_pure_dml,
                        ddl_breaks_transaction)
+from .sqlparse import validate_read_statement_ast
 from .readengine import execute_read_only_query
 from .writeengine import execute_any_sql, estimate_affected_rows
 from .transactions import (begin_transaction_impl, execute_in_transaction, _end_transaction,
@@ -107,6 +108,10 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
     try:
         resolved = await workspace._resolve_datasource(db_code)
         resolved_db_code = resolved["db_code"]
+        # 只读通道第二层（AST 二次判定）必须在数据源解析之后：方言来自 ds。
+        # 放在这里而不是 validate_read_only_sql 旁边，是为了保住"先报只读通道不允许写、
+        # 再报没有可用数据源"的既有排序（第一层在解析前跑）
+        validate_read_statement_ast(sql, resolved["ds"].get("db_type", ""))
         if txn_id:
             result_data = await _run_db(execute_in_transaction, txn_id, sql)
         else:
@@ -116,6 +121,12 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
                   execution_time_ms=result_data.get("execution_time_ms") if isinstance(result_data, dict) else None,
                   rows=result_data.get("total_rows") if isinstance(result_data, dict) else None, txn_id=txn_id)
         return _normalize_result(result_data)
+    except PermissionError as e:
+        # 第二层拒绝：与第一层同类型直通。不直通会被下面的 except Exception 包成
+        # ToolFailure("PermissionError: ...")，错误形状与第一层不一致，
+        # 技能层按文案匹配的分支会失配
+        _audit_error("query", resolved_db_code, sql, e, txn_id)
+        raise
     except ToolFailure as e:
         _audit_error("query", resolved_db_code, sql, e, txn_id)
         raise
@@ -303,6 +314,10 @@ async def export_csv(sql: str, file_path: str, db_code: Optional[str] = None, ti
                   execution_time_ms=result.get("execution_time_ms"), rows=result.get("rows_exported"),
                   detail=f"file={result.get('file_path')}")
         return _normalize_result(result)
+    except PermissionError as e:
+        # 第二层拒绝：与第一层同类型直通（理由见 query 工具同位置说明）
+        _audit_error("export_csv", resolved_db_code, sql, e)
+        raise
     except ToolFailure as e:
         _audit_error("export_csv", resolved_db_code, sql, e)
         raise
@@ -594,12 +609,18 @@ async def explain_query(sql: str, db_code: Optional[str] = None, analyze: bool =
     try:
         resolved = await workspace._resolve_datasource(db_code)
         resolved_db_code = resolved["db_code"]
+        # 第二层与 query 同一道门、同一个位置（数据源解析后，方言已知）
+        validate_read_statement_ast(sql, resolved["ds"].get("db_type", ""))
         result_data = await _run_db(explain_query_impl, sql, resolved["ds"],
                                     resolved["db_code"], analyze, fmt)
         audit_log("explain_query", resolved["db_code"], sql, status="ok",
                   execution_time_ms=result_data.get("execution_time_ms"),
                   detail=f"mode={result_data.get('mode')};verdict={result_data.get('verdict')}")
         return _normalize_result(result_data)
+    except PermissionError as e:
+        # 第二层拒绝：与第一层同类型直通（理由见 query 工具同位置说明）
+        _audit_error("explain_query", resolved_db_code, sql, e)
+        raise
     except ToolFailure as e:
         _audit_error("explain_query", resolved_db_code, sql, e)
         raise

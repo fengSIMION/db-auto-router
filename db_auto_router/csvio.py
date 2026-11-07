@@ -15,6 +15,7 @@ from .directconn import _open_direct_connection_with_timeout, _set_conn_autocomm
 from .errutil import safe_cursor
 from .pool import get_connection, put_connection
 from .sqlguard import validate_read_only_sql
+from .sqlparse import validate_read_statement_ast
 from .util import extract_db_and_table_from_sql, parse_cross_db_table, sql_placeholders
 
 
@@ -28,6 +29,8 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
     - timeout 受 QUERY_TIMEOUT_MAX 硬顶约束（与 query 同一套口径）
     """
     validate_read_only_sql(sql)
+    # 第二层（AST 二次判定）与 query 同一道门；此处方言来自 ds（调用方已解析数据源）
+    validate_read_statement_ast(sql, ds.get("db_type", ""))
 
     out_path = Path(file_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
