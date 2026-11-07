@@ -12,7 +12,8 @@ from .config import (MAX_RESULT_ROWS, MAX_RETRY_COUNT, RETRY_DELAY,
 from .directconn import _open_direct_connection_with_timeout
 from .errutil import is_transient_error, safe_close, safe_cursor
 from .logcfg import logger
-from .pool import get_connection, put_connection
+from .pool import get_connection, put_connection, pool_key_for
+from .readonly import enable_read_only, release_read_only, readonly_field
 from .sqlguard import validate_read_only_sql, check_sql_limit, strip_trailing_comments
 from .util import extract_db_and_table_from_sql
 
@@ -79,6 +80,12 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     execution_time_ms = 0.0
     direct_conn = None
     columns: list = []
+    dialect = ds.get("db_type", "").lower().strip()
+    # 第三层（数据库只读兜底）的连接身份与生效标记。初始化在循环外：
+    # 循环内每借出一条连接就重开一次，finally 统一恢复；direct_conn 分支不设
+    # （用完即关，无需恢复），此时返回字段为 false + note
+    ro_key = None
+    ro_enforced = False
     if effective_timeout != READ_TIMEOUT:
         direct_conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, effective_timeout)
 
@@ -102,6 +109,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
                 else:
                     conn = get_connection(ds, target_db if is_cross_db else None)
                     pooled_conn = conn
+                    # 第三层：数据库只读兜底。该库不认只读语法就降级，
+                    # 调用方在返回值 note 里说明，不假装安全
+                    ro_key = pool_key_for(ds, target_db if is_cross_db else None)
+                    ro_enforced = enable_read_only(conn, dialect, ro_key)
                 start_time = time.time()
                 # safe_cursor 收拢"取游标→用完关游标"的样板，退出时自动关闭
                 with safe_cursor(conn) as cursor:
@@ -162,6 +173,12 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
             finally:
                 # 借出的池连接每轮用完即还（成功 break、提前 return、异常重试都走到这）
                 if pooled_conn is not None:
+                    # 恢复必须先于归还：连接一旦回池就可能被别的调用者取走，
+                    # 带着只读标记会让他们后续的 execute 写库失败
+                    if ro_enforced and not release_read_only(
+                            conn, dialect, ro_key, ds, target_db if is_cross_db else None):
+                        pooled_conn = None   # 恢复失败：连接已弃，MUST NOT 回池
+                if pooled_conn is not None:
                     put_connection(ds, pooled_conn, target_db if is_cross_db else None)
     finally:
         if direct_conn is not None:
@@ -169,7 +186,7 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
             safe_close(direct_conn)
 
     # 结果自动摘要：超过阈值时只返回部分数据 + 统计信息
-    dialect = ds.get("db_type", "").lower().strip()
+    # （dialect 已在连接前算好，第三层要用）
 
     # 统一出口："参数被夹"与"结果被截断"两类提示合并进同一个 warning 键
     # （调用方只认这一个键，不新增字段），两类同时出现时都可见。
@@ -197,6 +214,7 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
         }
         if warning:
             summary_info["warning"] = warning
+        summary_info.update(readonly_field(dialect, ro_enforced))
         return summary_info
 
     # 返回结果，统一为 dict 格式（包含执行耗时和方言）
@@ -208,4 +226,5 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     }
     if warning:
         result["warning"] = warning
+    result.update(readonly_field(dialect, ro_enforced))
     return result

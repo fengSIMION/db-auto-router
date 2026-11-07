@@ -33,6 +33,7 @@ from .sqlguard import (split_sql_statements, is_ddl_operation,
                        validate_read_only_sql, is_provably_read_only, is_pure_dml,
                        ddl_breaks_transaction)
 from .sqlparse import validate_read_statement_ast
+from .readonly import readonly_field
 from .readengine import execute_read_only_query
 from .writeengine import execute_any_sql, estimate_affected_rows
 from .transactions import (begin_transaction_impl, execute_in_transaction, _end_transaction,
@@ -114,6 +115,11 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
         validate_read_statement_ast(sql, resolved["ds"].get("db_type", ""))
         if txn_id:
             result_data = await _run_db(execute_in_transaction, txn_id, sql)
+            # 第三层对事务内执行豁免：MySQL 上开只读会隐式提交用户在飞的事务。
+            # 如实标注，不让调用方以为这条查询有数据库级兜底
+            if isinstance(result_data, dict):
+                result_data.update(readonly_field(
+                    result_data.get("dialect", ""), False, exempt_reason="txn"))
         else:
             result_data = await _run_db(execute_read_only_query, sql, resolved["ds"],
                                         resolved["db_code"], max_rows=max_rows, timeout=timeout)

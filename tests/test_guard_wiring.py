@@ -11,12 +11,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from db_auto_router import tools, csvio
+from db_auto_router import tools, csvio, readengine, readonly
 from db_auto_router.errors import ToolFailure
+from tests.dbfakes import FakeConn, FakeCursor
 
 PG_DS = {"db_code": "x", "db_type": "postgres",
          "conn_url": "host=127.0.0.1 port=5432 dbname=d",
          "db_user": "u", "db_password": "p", "write_confirm": 1}
+MY_DS = {"db_code": "x", "db_type": "mysql", "conn_url": "127.0.0.1:3306",
+         "db_user": "u", "db_password": "p", "write_confirm": 1}
+
+
+@pytest.fixture(autouse=True)
+def _clean_capability_cache(monkeypatch):
+    """能力缓存是模块级状态，且 key 由 ds 算出——同一份 FAKE_DS 在不同测试间
+    会命中同一个 key。不清就等于把"这个库不支持只读"的结论泄漏给下一个测试，
+    测试结果随执行顺序漂移。"""
+    monkeypatch.setattr(readonly, "_capability", {})
+    monkeypatch.setattr(readonly, "_original", {})
+
+
+class RowConn(FakeConn):
+    """返回一批结果集的假连接：description 两列，fetchmany 给一批然后空。"""
+
+    def __init__(self, rows=60, fail_on=None):
+        super().__init__(fail_on=fail_on)
+        self._n_rows = rows
+
+    def cursor(self):
+        cur = FakeCursor(self)
+        cur.description = [("a",), ("b",)]
+        cur._rows = [[(i, "x") for i in range(self._n_rows)], []]
+        return cur
 
 
 @pytest.fixture
@@ -73,3 +99,52 @@ def test_export_csv_layer2_rejection(wired, tmp_path):
 def test_clean_query_still_passes_both_layers(wired):
     r = asyncio.run(tools.query("SELECT 1", ctx=None))
     assert r["total_rows"] == 0
+
+
+# ---- Task 4：第三层接入 query 读路径 + read_only_enforced 字段 ----------
+
+def _fake_pool(monkeypatch, conn):
+    monkeypatch.setattr(readengine, "get_connection", lambda ds, db=None: conn)
+    monkeypatch.setattr(readengine, "put_connection", lambda ds, c, db=None: None)
+
+
+def test_query_result_carries_read_only_enforced(monkeypatch):
+    c = RowConn()
+    _fake_pool(monkeypatch, c)
+    r = readengine.execute_read_only_query("SELECT * FROM t", MY_DS, "x")
+    assert r["read_only_enforced"] is True
+    assert any("START TRANSACTION READ ONLY" in s for s in c.executed)
+
+
+def test_query_degrades_with_note_when_db_rejects(monkeypatch):
+    """库不认只读语法：字段 false + note 说明，但查询本身照常成功。"""
+    c = RowConn(fail_on={"READ ONLY": PermissionError("nope")})
+    _fake_pool(monkeypatch, c)
+    r = readengine.execute_read_only_query("SELECT * FROM t", MY_DS, "x")
+    assert r["read_only_enforced"] is False and "一二层" in r["note"]
+    assert r["total_rows"] == 60          # 查询没被第三层拖死
+
+
+def test_summary_shape_carries_field(monkeypatch):
+    """第二个成功返回形状（超过 SUMMARY_THRESHOLD 的摘要 dict）也必须带字段。"""
+    c = RowConn(rows=60)
+    _fake_pool(monkeypatch, c)
+    r = readengine.execute_read_only_query("SELECT * FROM t", MY_DS, "x")
+    assert r.get("summary") is True
+    assert r["read_only_enforced"] is True
+
+
+def test_txn_read_marks_exempt(monkeypatch):
+    """事务内读路径：豁免第三层 + 如实标注；且绝不碰连接的只读开关。"""
+    async def fake_resolve(db_code):
+        return {"sources": {}, "db_code": "x", "ds": MY_DS}
+    touched = []
+    monkeypatch.setattr(tools, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(tools.workspace, "_resolve_datasource", fake_resolve)
+    monkeypatch.setattr(tools, "execute_in_transaction",
+                        lambda txn_id, sql: {"data": [], "total_rows": 0, "dialect": "mysql"})
+    monkeypatch.setattr(readonly, "enable_read_only",
+                        lambda *a, **k: touched.append(a) or True)
+    r = asyncio.run(tools.query("SELECT 1", txn_id="t1", ctx=None))
+    assert r["read_only_enforced"] is False and "事务" in r["note"]
+    assert touched == []                   # 事务路径没有去开只读
