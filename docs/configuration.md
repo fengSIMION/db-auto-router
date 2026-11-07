@@ -25,7 +25,9 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 |---|---|---|
 | `MCP_CONNECT_TIMEOUT` | `10` | 连接超时（秒） |
 | `MCP_READ_TIMEOUT` | `30` | 读取超时（秒） |
+| `MCP_QUERY_TIMEOUT_MAX` | `600` | **超时硬顶（秒）**：`query` / `export_csv` 的 `timeout` 参数不许超过它，超顶夹回并在返回值 `warning` 里说明 |
 | `MCP_MAX_RESULT_ROWS` | `1000` | 无 LIMIT 时的最大返回行数（截断） |
+| `MCP_QUERY_MAX_ROWS_CAP` | `50000` | **行数硬顶**：`query` 的 `max_rows` 参数不许超过它，超顶夹回并在 `warning` 里说明；要更大结果集请用 `export_csv` 落文件 |
 | `MCP_MAX_RETRY_COUNT` / `MCP_RETRY_DELAY` | `3` / `1.0` | 失败重试次数与间隔（秒） |
 | `MCP_MAX_POOL_SIZE` | `10` | 连接池最大连接数 |
 | `MCP_POOL_IDLE_TIME` | `300` | 连接最大空闲时间（秒），定期清理 |
@@ -61,7 +63,7 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `MCP_EXPORT_BATCH` / `MCP_IMPORT_BATCH` | `2000` / `500` | 每批从游标读取 / executemany 提交的行数 |
-| `MCP_EXPORT_MAX_ROWS` | `5000000` | 导出/导入行数硬上限（防爆盘） |
+| `MCP_EXPORT_MAX_ROWS` | `5000000` | 导出/导入行数硬上限（防爆盘）。`export_csv` 的 `max_rows` 参数**只能把上限调小、不能调大**——超过它会被夹回并在 `warning` 里说明 |
 | `MCP_AUDIT_LOG_DIR` | `logs` | 日志目录；`off` = 关闭审计 |
 | `MCP_AUDIT_LOG_SCAN_DAYS` | `30` | `query_audit_log` 默认扫描最近几天的文件（按文件名日期判定，不看 mtime）；传 `0` 不限 |
 | `MCP_AUDIT_LOG_RETAIN_DAYS` | `0` | `>0` 时启动时删除更早的日志文件；`0` = 永久保留 |

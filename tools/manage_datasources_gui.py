@@ -30,9 +30,10 @@ v4.8 变更：
   点「重置列宽」可恢复自适应
 - 新增「复制」按钮：复制选中数据源，工作目录名后加 _copy（数据库名称不变）——
   副本是"给另一个目录用的同一套连接参数"
-- 同目录同色：列表按 dir_path 排序，同项目的数据源本就挨在一起，一个浅色底就是
-  一个项目分组，一眼看出哪几条属于同一个项目。只有一个目录时（全是 * 兜底）
-  着色没有区分意义，退回原来的隔行浅蓝
+- 同目录同色：列表按 dir_path 排序，同项目的数据源本就挨在一起，背景与字色同一
+  色系就是同一个项目分组，一眼看出哪几条属于同一个项目；默认数据源整行加粗。
+  审核状态（是否免人工审核）只看「审核」列的文字，不给整行上色。只有一个目录时
+  背景没有区分意义，退回原来的隔行浅蓝
 - 修复「编辑/复制弹窗里长路径看不全」：所有输入框原为固定 width=30，一条 63 字符的
   目录路径有一半以上挡在框外。改为按当前取值实测像素宽设定（封顶 72 字符），
   弹窗整体仍受 90% 屏宽上限约束
@@ -863,17 +864,19 @@ class App(tk.Tk):
     # 文本像素宽比真实渲染窄一大截，会漏掉这类问题
     MAXW = {"目录": 1000, "项目名称": 300, "数据库名称": 300, "类型": 100,
             "地址": 400, "用户": 200, "默认": 60, "审核": 90}
-    # 同目录同色用的浅色底（低饱和：黑字/默认行绿字/免审核橙字压在上面都读得清）。
-    # 第一个就是原来的隔行蓝，单目录退回 zebra 时观感和之前完全一致。
+    # 同目录同色：每项是 (浅色底, 同色系加深字色)。字色跟着背景一起变，
+    # "这一行属于哪个项目"不用盯着底色也能读出来；深字压浅底对比度足够
+    # （tests/test_gui_row_styles.py 用相对亮度钉住这条，换色时别配成浅字）。
+    # 第一个背景就是原来的隔行蓝，单目录退回 zebra 时观感和之前完全一致。
     # 颜色数量只是"几个项目后开始循环"，相邻两组异色靠 _dir_colors 的顺序分配保证，
-    # 与用掉几个颜色无关
-    DIR_COLORS = ("#EBF1F9",   # 浅蓝
-                  "#F1EBF9",   # 浅紫
-                  "#EAF6EE",   # 浅绿
-                  "#FCF1DC",   # 浅黄
-                  "#F7EAEA",   # 浅红
-                  "#E3F0EF",   # 浅青
-                  "#EFEFEF")   # 浅灰
+    # 与用掉几个颜色无关。背景/字色各自都不许重复，否则分组与分色都会失效
+    DIR_COLORS = (("#EBF1F9", "#1F4E79"),   # 浅蓝 / 深蓝
+                  ("#F1EBF9", "#5B3A8E"),   # 浅紫 / 深紫
+                  ("#EAF6EE", "#1E6B3A"),   # 浅绿 / 深绿
+                  ("#FCF1DC", "#8A6100"),   # 浅黄 / 深黄褐
+                  ("#F7EAEA", "#9B2C2C"),   # 浅红 / 深红
+                  ("#E3F0EF", "#155E63"),   # 浅青 / 深青
+                  ("#EFEFEF", "#4A4A4A"))   # 浅灰 / 深灰
     # 内容实测时"文本之外的富余"候选值，从宽到紧。_autofit 取第一个能让总宽塞进可视区的，
     # 所以列宽自适应内容、又不会因为太松而挤出水平滚动条。ttk 单元格内边距实测约 3px，
     # 下限取 6 仍有余量——调小 pad 只会让列紧一点，不会截断文本
@@ -932,6 +935,8 @@ class App(tk.Tk):
         self._w_cache = {}          # 文本像素宽记忆，见 _text_width
         self._f_cell = tkfont.Font(font=("Microsoft YaHei UI", 10))
         self._f_head = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
+        # 默认数据源整行加粗用。与 _f_cell 同字体同字号，只差字重
+        self._f_bold = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
 
         bar = ttk.Frame(self, padding=12)
         bar.pack(fill="x")
@@ -965,13 +970,9 @@ class App(tk.Tk):
         self.tree.bind("<Configure>", self._on_tree_resize)
         # 手工拖列：松手时拿当前宽度和"代码上次写入的宽度"对比，变了的就是用户拖的
         self.tree.bind("<ButtonRelease-1>", self._on_click_release)
-        # 隔行浅蓝底（zebra）+ 默认数据源整行绿字 + 免人工审核整行橙字（v4.6）
-        self.tree.tag_configure("zebra", background="#EBF1F9")
-        self.tree.tag_configure("default_row", foreground="#1E7B34")
-        self.tree.tag_configure("no_confirm", foreground="#B35400")
-        # 同目录同色（v4.8）：一个浅色底 = 一个项目分组。全部预注册，用不到的无害
-        for _i, _c in enumerate(self.DIR_COLORS):
-            self.tree.tag_configure(f"dir{_i}", background=_c)
+        # 隔行浅蓝底（zebra）+ 免人工审核整行橙字 + 同目录同色（背景与字色）
+        # + 默认数据源整行加粗。分层口径见 _row_tags，注册与断言共用同一套设计
+        self._configure_row_tags(self.tree)
 
         self.status = ttk.Label(self, text="", padding=12, foreground="#555")
         self.status.pack(fill="x", side="bottom")
@@ -1005,6 +1006,39 @@ class App(tk.Tk):
             out[k] = i
             prev = i
         return out
+
+    def _configure_row_tags(self, tree):
+        """注册行样式 tag。分层口径见 _row_tags。
+
+        每个 tag 只设置一个维度的选项，同一行绝不会出现两个 tag 抢同一个选项——
+        渲染结果因此不依赖 ttk 的 tag 优先级规则（那条规则跨版本/主题并不稳定，
+        靠"后设置的赢"去叠颜色等于把显示交给运气）。
+        """
+        tree.tag_configure("zebra", background=self.DIR_COLORS[0][0])
+        # 背景与字色拆成两个 tag：单目录时隔行只换底、字色仍跟目录
+        for _i, (_bg, _fg) in enumerate(self.DIR_COLORS):
+            tree.tag_configure(f"dir{_i}", background=_bg)
+            tree.tag_configure(f"fgdir{_i}", foreground=_fg)
+        # 默认数据源只设字重，不碰字色——字色归目录那一层
+        tree.tag_configure("default_row", font=self._f_bold)
+
+    @staticmethod
+    def _row_tags(color_idx, is_default, banded, row_index):
+        """一行的 tag 列表：背景 / 字色 / 字重三层各选一个，互不重叠。
+
+        背景：多目录时按目录取色；只有一个目录时没有区分意义，退回隔行浅蓝
+        字色：一律跟目录——同一项目就同色，审核状态只看「审核」列的文字
+        字重：默认数据源加粗
+        """
+        tags = []
+        if banded:
+            tags.append(f"dir{color_idx}")
+        elif row_index % 2 == 0:
+            tags.append("zebra")
+        tags.append(f"fgdir{color_idx}")
+        if is_default == 1:
+            tags.append("default_row")
+        return tags
 
     def _text_width(self, text, bold=False):
         """文本像素宽（列宽实测用）。测量失败时按字符数粗估，不至于让布局崩掉。
@@ -1237,16 +1271,7 @@ class App(tk.Tk):
         color_of = self._dir_colors([self._dir_key(r[0]) for r in rows])
         banded = len(color_of) > 1
         for i, (d, name, code, t, url, user, schema, isdef, wconf) in enumerate(self._rows):
-            tags = []
-            if banded:
-                tags.append(f"dir{color_of[self._dir_key(d)]}")
-            elif i % 2 == 0:
-                tags.append("zebra")
-            if isdef == 1:
-                tags.append("default_row")
-            if wconf != 1:
-                # 免审核行整行橙色：扫一眼就知道哪个库写操作不弹窗
-                tags.append("no_confirm")
+            tags = self._row_tags(color_of[self._dir_key(d)], isdef, banded, i)
             # v4.8：db_schema 不再进 values——列表不展示 Schema/Owner 列。
             # self._rows 里仍保留该字段，编辑/测试/删除都按 9 元组解包，不受影响
             vals = (d if d not in ("*", "") else "*（任意目录兜底）",
@@ -1260,7 +1285,7 @@ class App(tk.Tk):
         self._autofit()
         self.status.configure(
             foreground="#555",
-            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ 同色=同一目录（项目）｜ "
+            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ 同色系=同一目录（项目）｜ "
                  f"保存后 MCP 下一次查询自动生效（秒级），无需调 refresh_datasources ｜ "
                  f"MCP 版本 v{cfg.MCP_SERVER_INFO['version']}")
         if self._first:

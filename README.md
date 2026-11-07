@@ -199,6 +199,14 @@ MCP 终端确认。弹窗里附**影响行数预估**——在专用连接上试
 `query` 工具在服务端校验语句，只放行 SELECT/SHOW/DESC/EXPLAIN/WITH；
 `explain_query` 走同一道守卫，`EXPLAIN ANALYZE DELETE ...` 这类会被直接拦下。
 
+**返回体量硬顶（服务端强制）**
+
+`query` 的 `max_rows` 不超过 50000 行、`timeout` 不超过 600 秒，`export_csv` 的
+`max_rows` 只能把 `MCP_EXPORT_MAX_ROWS` 往下调。这三个参数是模型自己决定传什么的，
+不设顶时传个 `max_rows=10000000` 会把上千万行整份塞进上下文、把会话撑爆。
+超顶时**夹回硬顶并在返回值 `warning` 里说明**，不默默照做、也不静默改小。
+三个值都可用环境变量调整（见 [docs/configuration.md](docs/configuration.md)）。
+
 > ⚠️ `data/datasources.db` 里密码是明文，文件本身不要外传。
 
 ## 📁 目录结构

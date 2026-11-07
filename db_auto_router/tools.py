@@ -87,7 +87,7 @@ def _audit_error(tool: str, db_code: str, sql: str, exc: BaseException, txn_id: 
 # --- 工具实现（参数名/工具名与 v2.x 兼容；docstring 即工具 description） ---
 
 async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int] = None, timeout: Optional[int] = None, txn_id: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
-    """执行只读SQL查询。根据当前工作目录自动路由到对应数据库(默认走 is_default=1 的数据源,可用 list_datasources 查看)。仅支持 SELECT/SHOW/DESC/EXPLAIN/WITH 语句。支持跨库查询语法：db_code.table_name 或 database.table_name。未指定 LIMIT 时自动添加 LIMIT 1000;结果超过50行返回摘要(前10行 + total_rows 总数)。返回值含 execution_time_ms(执行耗时,>1000ms 视为慢查询)、dialect(数据库类型,如 mysql/dm/postgres/oracle/gaussdb)。max_rows 覆盖默认1000行上限(重分析场景用)；timeout 覆盖默认30秒超时(长查询用,单位秒)；txn_id 在指定事务中执行(配合 begin_transaction 使用;事务内同样仅允许只读语句,事务内写数据请用 execute 配合 txn_id,会走服务端确认)。注意：传了 txn_id 时走事务专用连接，max_rows/timeout 均不生效（按默认上限与超时执行）。"""
+    """执行只读SQL查询。根据当前工作目录自动路由到对应数据库(默认走 is_default=1 的数据源,可用 list_datasources 查看)。仅支持 SELECT/SHOW/DESC/EXPLAIN/WITH 语句。支持跨库查询语法：db_code.table_name 或 database.table_name。未指定 LIMIT 时自动添加 LIMIT 1000;结果超过50行返回摘要(前10行 + total_rows 总数)。返回值含 execution_time_ms(执行耗时,>1000ms 视为慢查询)、dialect(数据库类型,如 mysql/dm/postgres/oracle/gaussdb)。max_rows 覆盖默认1000行上限(重分析场景用)，但不得超过硬顶 50000 行(MCP_QUERY_MAX_ROWS_CAP 可调)，超顶会被夹回硬顶并在返回值的 warning 里说明，需要更大结果集请改用 export_csv 落文件；timeout 覆盖默认30秒超时(长查询用,单位秒)，不得超过硬顶 600 秒(MCP_QUERY_TIMEOUT_MAX 可调)，超顶同样夹回并在 warning 里说明；txn_id 在指定事务中执行(配合 begin_transaction 使用;事务内同样仅允许只读语句,事务内写数据请用 execute 配合 txn_id,会走服务端确认)。注意：传了 txn_id 时走事务专用连接，max_rows/timeout 均不生效（按默认上限与超时执行）。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql:
@@ -288,7 +288,7 @@ async def list_transactions(ctx: Context = None) -> dict[str, Any]:
 
 
 async def export_csv(sql: str, file_path: str, db_code: Optional[str] = None, timeout: Optional[int] = None, max_rows: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
-    """导出查询结果为 CSV 文件（重武器）。只读查询，绕过常规 1000 行返回限制，游标流式分批写入，支持大结果集（默认上限500万行，MCP_EXPORT_MAX_ROWS 可调）。参数：sql(只读查询)、file_path(输出 CSV 路径,目录不存在会自动创建,用 utf-8-sig 编码 Excel 可直接打开)、timeout(可选,长查询超时秒数)、max_rows(可选,覆盖行数上限)。返回 file_path/rows_exported/columns。"""
+    """导出查询结果为 CSV 文件（重武器）。只读查询，绕过常规 1000 行返回限制，游标流式分批写入，支持大结果集（默认上限500万行，MCP_EXPORT_MAX_ROWS 可调）。参数：sql(只读查询)、file_path(输出 CSV 路径,目录不存在会自动创建,用 utf-8-sig 编码 Excel 可直接打开)、timeout(可选,长查询超时秒数,不得超过硬顶 600 秒 MCP_QUERY_TIMEOUT_MAX)、max_rows(可选,只能把行数上限调小、不能调大,超过 MCP_EXPORT_MAX_ROWS 会被夹回并在返回值 warning 里说明)。返回 file_path/rows_exported/columns。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql or not file_path:

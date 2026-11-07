@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from .config import EXPORT_BATCH, EXPORT_MAX_ROWS, IMPORT_BATCH
+from .config import (EXPORT_BATCH, EXPORT_MAX_ROWS, IMPORT_BATCH,
+                     READ_TIMEOUT, QUERY_TIMEOUT_MAX, clamp_override)
 from .directconn import _open_direct_connection_with_timeout, _set_conn_autocommit
 from .errutil import safe_cursor
 from .pool import get_connection, put_connection
@@ -23,7 +24,8 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
 
     - 仅允许只读 SQL（复用 validate_read_only_sql 校验，去掉查询工具的 LIMIT 自动追加）
     - 游标分批读取（EXPORT_BATCH），逐批写文件，内存占用恒定
-    - 行数硬上限 EXPORT_MAX_ROWS 防爆盘
+    - 行数硬上限 EXPORT_MAX_ROWS 防爆盘；max_rows 只能往下调，不能把它顶到更大
+    - timeout 受 QUERY_TIMEOUT_MAX 硬顶约束（与 query 同一套口径）
     """
     validate_read_only_sql(sql)
 
@@ -32,14 +34,25 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
 
     target_db, table_name, is_cross_db = extract_db_and_table_from_sql(sql, default_db)
 
+    # timeout 是调用方（模型）可传的参数，与 query 同一套硬顶口径。
+    # 保留原来的"传了就走专用连接"分支不变，只把连接上的超时值换成夹过的值。
+    effective_timeout, timeout_clamped = clamp_override(timeout, READ_TIMEOUT, QUERY_TIMEOUT_MAX)
     if timeout and timeout > 0:
-        conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, timeout)
+        conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, effective_timeout)
         conn_is_direct = True
     else:
         conn = get_connection(ds, target_db if is_cross_db else None)
         conn_is_direct = False
 
-    cap = max_rows if (max_rows and max_rows > 0) else EXPORT_MAX_ROWS
+    # EXPORT_MAX_ROWS 本来就是防爆盘的硬顶，但 max_rows 参数能把它覆盖到更大，
+    # 等于没有顶。天花板取 EXPORT_MAX_ROWS 自身：参数只能往下调。
+    cap, cap_clamped = clamp_override(max_rows, EXPORT_MAX_ROWS, EXPORT_MAX_ROWS)
+    cap_warning = (f"⚠️ 请求的 max_rows={max_rows} 超过导出行数硬顶 {EXPORT_MAX_ROWS} 行，"
+                   f"已限制为 {cap} 行") if cap_clamped else None
+    if timeout_clamped:
+        cap_warning = "\n".join(w for w in (cap_warning, (
+            f"⚠️ 请求的 timeout={timeout} 秒超过单次查询超时硬顶 {QUERY_TIMEOUT_MAX} 秒，"
+            f"已限制为 {effective_timeout} 秒")) if w)
     total = 0
     columns: List[str] = []
     start_time = time.time()
@@ -73,7 +86,7 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
                         break
         execution_time_ms = round((time.time() - start_time) * 1000, 2)
         os.replace(tmp_path, out_path)
-        return {
+        result = {
             "success": True,
             "file_path": str(out_path.resolve()),
             "columns": columns,
@@ -84,6 +97,9 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
             "dialect": ds.get("db_type", "").lower().strip(),
             "message": f"已导出 {total} 行到 {out_path}" + (f"（达到上限 {cap} 行，已截断）" if truncated else "")
         }
+        if cap_warning:
+            result["warning"] = cap_warning
+        return result
     finally:
         # 失败/中断路径清掉半截文件，绝不留一个看起来像完整导出的 .part
         try:

@@ -33,6 +33,17 @@ CFG_PWD = os.environ.get("MCP_CONFIG_PASSWORD", "")
 CFG_DB = os.environ.get("MCP_CONFIG_DATABASE", "mcp")
 CONNECT_TIMEOUT = int(os.environ.get("MCP_CONNECT_TIMEOUT", "10"))
 READ_TIMEOUT = int(os.environ.get("MCP_READ_TIMEOUT", "30"))
+# 单次查询超时硬顶（秒）：query / export_csv 的 timeout 参数不许超过它。
+# 与行数硬顶同一个理由——timeout 是模型自己决定传什么的参数，不设顶就能传个
+# 999999 把一条连接长时间楔住（_db_gate 只限并发，不限单条时长）。
+# 默认 600 秒（10 分钟），与 dump_database 子进程超时同一量级。
+QUERY_TIMEOUT_MAX = int(os.environ.get("MCP_QUERY_TIMEOUT_MAX", "600"))
+# 硬顶不得低于默认值，否则不带 timeout 的查询（走 READ_TIMEOUT）会绕过硬顶，
+# "绝对上限"名不副实。抬到默认值并留一条日志，不让配置静默失效。
+if QUERY_TIMEOUT_MAX < READ_TIMEOUT:
+    logger.warning(f"MCP_QUERY_TIMEOUT_MAX={QUERY_TIMEOUT_MAX} 小于 MCP_READ_TIMEOUT={READ_TIMEOUT}，"
+                   f"超时硬顶已抬到 {READ_TIMEOUT}（硬顶低于默认值时，不带 timeout 的查询会绕过硬顶）")
+    QUERY_TIMEOUT_MAX = READ_TIMEOUT
 
 # mysql 配置模式下版本探测结果的缓存时长（秒）。
 # 每次工具调用都要探一次配置库版本号以感知外部改动，不缓存就等于每次调用都新开
@@ -47,6 +58,31 @@ CONFIG_PROBE_TTL = max(0.0, float(os.environ.get("MCP_CONFIG_PROBE_TTL", "2.0"))
 # 属于死配置——真实行为是"无 LIMIT 的 SELECT 一律追加 LIMIT MAX_RESULT_ROWS"，
 # 与阈值无关。已从本文件与 .env 删除，避免照着它调参却发现毫无效果。
 MAX_RESULT_ROWS = int(os.environ.get("MCP_MAX_RESULT_ROWS", "1000"))  # 最大返回行数
+# 行数硬顶：调用方传 max_rows=... 时不许超过这个值。
+# 原实现是 `max_rows if (max_rows and max_rows > 0) else MAX_RESULT_ROWS`——
+# 模型传 10000000 就照单全收，一千万行整份拉进内存再塞进 MCP 响应，会话直接撑爆。
+# 硬顶存在的全部意义就是压住"模型自己决定传什么"的这个参数。
+# 默认 5 万行：真要更多数据应该走 export_csv 落文件，而不是进上下文。
+QUERY_MAX_ROWS_CAP = int(os.environ.get("MCP_QUERY_MAX_ROWS_CAP", "50000"))
+# 硬顶不得低于默认值，否则不带 max_rows 的查询（走 MAX_RESULT_ROWS）会绕过硬顶。
+# 与 QUERY_TIMEOUT_MAX 同一条不变式，处理方式也一致：抬到默认值并留日志。
+if QUERY_MAX_ROWS_CAP < MAX_RESULT_ROWS:
+    logger.warning(f"MCP_QUERY_MAX_ROWS_CAP={QUERY_MAX_ROWS_CAP} 小于 MCP_MAX_RESULT_ROWS={MAX_RESULT_ROWS}，"
+                   f"行数硬顶已抬到 {MAX_RESULT_ROWS}（硬顶低于默认值时，不带 max_rows 的查询会绕过硬顶）")
+    QUERY_MAX_ROWS_CAP = MAX_RESULT_ROWS
+
+
+def clamp_override(requested, default, ceiling):
+    """把"调用方可覆盖"的参数夹进天花板内，返回 (有效值, 是否被夹)。
+
+    requested 为 None/<=0 → 用 default（调用方没表达意愿，不算被夹）。
+    其余取 requested，但绝不超过 ceiling；超了返回 ceiling 并置标记，
+    由调用方据此向调用者如实告知——不默默照做，也不静默改小。
+    """
+    base = default if (not requested or requested <= 0) else requested
+    if base > ceiling:
+        return ceiling, True
+    return base, False
 MAX_RETRY_COUNT = int(os.environ.get("MCP_MAX_RETRY_COUNT", "3"))  # 最大重试次数
 RETRY_DELAY = float(os.environ.get("MCP_RETRY_DELAY", "1.0"))  # 重试延迟（秒）
 
