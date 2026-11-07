@@ -16,7 +16,7 @@ from .errutil import safe_cursor
 from .pool import get_connection, put_connection, pool_key_for
 from .readonly import enable_read_only, release_read_only, readonly_field
 from .sqlguard import validate_read_only_sql
-from .sqlparse import validate_read_statement_ast
+from .astguard import validate_read_statement_ast
 from .util import extract_db_and_table_from_sql, parse_cross_db_table, sql_placeholders
 
 
@@ -111,7 +111,10 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
         }
         if cap_warning:
             result["warning"] = cap_warning
-        result.update(readonly_field(dialect, ro_enforced))
+        # 直连路径如实归因给"专用连接"，不许说成"库不支持该语法"——
+        # 那会让模型告诉用户他们的数据库不支持只读兜底，而事实并非如此
+        result.update(readonly_field(
+            dialect, ro_enforced, exempt_reason="direct" if conn_is_direct else None))
         return result
     finally:
         # 失败/中断路径清掉半截文件，绝不留一个看起来像完整导出的 .part

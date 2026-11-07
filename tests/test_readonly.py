@@ -61,7 +61,31 @@ def test_explicit_rejection_cached_per_pool_key(monkeypatch):
     assert c3.executed != []                       # 换 pool_key 重新探测（不连坐）
 
 
-# 3. 瞬时错误不缓存：一次网络抖动不许永久毒化该层 -----------------------
+# 3. 瞬时/未识别故障绝不缓存；只有"明确被告知不支持"才缓存 ---------------
+#
+# 原实现用"不是瞬态就缓存"的默认方向，被评审抓出漏洞：PG 断开连接的消息
+# （server closed the connection unexpectedly 等）不在瞬态标记表里，会被
+# 误判成"库不支持只读"并永久缓存——MCP 进程活数天，第三层静默关闭一整周。
+# 改为反向默认：只有**正面识别**为永久拒绝才缓存，其余一律重新探测。
+
+def test_syntax_rejection_is_cached(monkeypatch):
+    monkeypatch.setattr(readonly, "_capability", {})
+    boom = Exception("You have an error in your SQL syntax near 'START TRANSACTION READ ONLY'")
+    c = FakeConn(fail_on={"READ ONLY": boom})
+    assert enable_read_only(c, "mysql", "k1") is False
+    c2 = FakeConn(fail_on={"READ ONLY": boom})
+    assert enable_read_only(c2, "mysql", "k1") is False
+    assert c2.executed == []                       # 明确不支持 → 缓存，不再探测
+
+
+def test_unrecognized_connection_drop_not_cached(monkeypatch):
+    monkeypatch.setattr(readonly, "_capability", {})
+    c = FakeConn(fail_on={"READ ONLY":
+                          ConnectionError("server closed the connection unexpectedly")})
+    assert enable_read_only(c, "mysql", "k1") is False
+    c2 = FakeConn()
+    assert enable_read_only(c2, "mysql", "k1") is True    # 未缓存 → 重新探测并生效
+
 
 def test_transient_error_not_cached(monkeypatch):
     monkeypatch.setattr(readonly, "_capability", {})
@@ -83,14 +107,19 @@ def test_guard_off(monkeypatch):
 
 # 5. 恢复：PG 恢复原值；MySQL 无需恢复；恢复失败弃连接 -------------------
 
-def test_release_restores_pg_original_value(monkeypatch):
+def test_release_resets_pg_setting_to_session_default(monkeypatch):
+    """C1 回归：恢复必须用 RESET（回到会话默认值），不许把"读到的原值"写回去。
+
+    原值若在 SET 之后读，current_setting 返回的就是 on——恢复语句会把自己
+    刚打开的只读状态原样写回去，连接带着 only-read 回池，后续 execute 写库失败。
+    断言精确到整条语句，含糊的"包含 default_transaction_read_only"抓不到这个 bug。
+    """
     monkeypatch.setattr(readonly, "_capability", {})
-    monkeypatch.setattr(readonly, "_original", {})
     c = FakeConn()
     enable_read_only(c, "postgres", "k1")
     c.executed.clear()
     assert release_read_only(c, "postgres", "k1", ds={"db_type": "postgres"}) is True
-    assert any("default_transaction_read_only" in s for s in c.executed)
+    assert c.executed == ["RESET default_transaction_read_only"]
 
 
 def test_release_noop_for_mysql():
@@ -101,10 +130,24 @@ def test_release_noop_for_mysql():
     assert c.executed == []
 
 
+@pytest.mark.parametrize("d", ["oracle", "dm"])
+def test_oracle_dm_wrap_query_in_readonly_transaction(d):
+    """Oracle/达梦：autocommit 下 SET TRANSACTION READ ONLY 会被驱动立刻提交，
+    只读标记随那个只含 SET 的事务一起失效——必须先把 autocommit 关掉，让 SET
+    与查询落在同一个事务里；释放时回滚并恢复 autocommit。"""
+    c = FakeConn()
+    assert enable_read_only(c, d, _key()) is True
+    assert c.autocommit is False                      # 已关，SET 才会留在事务里
+    assert any("SET TRANSACTION READ ONLY" in s for s in c.executed)
+    c.executed.clear()
+    assert release_read_only(c, d, _key(), ds={"db_type": d}) is True
+    assert "--rollback--" in c.executed               # 回滚，只读标记随之失效
+    assert c.autocommit is True                       # 恢复，连接才能回池
+
+
 def test_release_failure_discards_connection(monkeypatch):
     """恢复失败必须弃连接：连接带着 only-read 标记回池，会让后续 execute 写库失败。"""
     monkeypatch.setattr(readonly, "_capability", {})
-    monkeypatch.setattr(readonly, "_original", {"k1": "off"})
     c = FakeConn()
     enable_read_only(c, "postgres", "k1")
     c.fail_on["default_transaction_read_only"] = ConnectionError("connection reset")

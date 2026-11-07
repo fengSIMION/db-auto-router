@@ -32,8 +32,8 @@ from .util import normalize_path
 from .sqlguard import (split_sql_statements, is_ddl_operation,
                        validate_read_only_sql, is_provably_read_only, is_pure_dml,
                        ddl_breaks_transaction)
-from .sqlparse import validate_read_statement_ast
-from .readonly import readonly_field
+from .astguard import validate_read_statement_ast
+from .readonly import readonly_field, merge_note
 from .readengine import execute_read_only_query
 from .writeengine import execute_any_sql, estimate_affected_rows
 from .transactions import (begin_transaction_impl, execute_in_transaction, _end_transaction,
@@ -621,8 +621,10 @@ async def explain_query(sql: str, db_code: Optional[str] = None, analyze: bool =
                                     resolved["db_code"], analyze, fmt)
         if isinstance(result_data, dict):
             # 第三层对 EXPLAIN 豁免：Oracle/达梦的 EXPLAIN PLAN FOR 要写 PLAN_TABLE，
-            # 只读事务里必报错。一二层照旧，此处如实标注
-            result_data.update(readonly_field(
+            # 只读事务里必报错。一二层照旧，此处如实标注。
+            # 用 merge_note 而非 update：impl 自己会写 note（如"EXPLAIN ANALYZE
+            # 已真实执行该 SELECT"），覆盖掉等于把安全相关信息弄丢
+            merge_note(result_data, readonly_field(
                 resolved["ds"].get("db_type", ""), False, exempt_reason="explain"))
         audit_log("explain_query", resolved["db_code"], sql, status="ok",
                   execution_time_ms=result_data.get("execution_time_ms"),

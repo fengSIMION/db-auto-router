@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """第二层接入三个只读通道的接线测试（Task 3）。
 
-测的是"接没接上"，不是第二层本身的判定逻辑（那在 test_sqlparse.py）。
+测的是"接没接上"，不是第二层本身的判定逻辑（那在 test_astguard.py）。
 关键：用例必须选**第一层放行、第二层拒绝**的语句——高危函数正是这样的语句：
 第一层只判语句形态，拦不住"形态是 SELECT 但函数有副作用"。
 若拿 `WITH c AS (INSERT...)` 这类第一层本就拦的语句来测，不接第二层测试也会绿。
@@ -28,7 +28,6 @@ def _clean_capability_cache(monkeypatch):
     会命中同一个 key。不清就等于把"这个库不支持只读"的结论泄漏给下一个测试，
     测试结果随执行顺序漂移。"""
     monkeypatch.setattr(readonly, "_capability", {})
-    monkeypatch.setattr(readonly, "_original", {})
 
 
 class RowConn(FakeConn):
@@ -180,3 +179,32 @@ def test_explain_marks_exempt(monkeypatch):
     monkeypatch.setattr(tools, "explain_query_impl", lambda *a, **k: {"plan": "x"})
     r = asyncio.run(tools.explain_query("SELECT 1", ctx=None))
     assert r["read_only_enforced"] is False and "PLAN_TABLE" in r["note"]
+
+
+# ---- 评审修复回归：explain 的 note 不许被覆盖 --------------------------
+
+def test_explain_note_is_merged_not_overwritten(monkeypatch):
+    """I1：explain_query_impl 自己会写 note（如"EXPLAIN ANALYZE 已真实执行该 SELECT"）。
+    覆盖掉它，调用方就不再知道这条查询真的执行过了——安全相关信息丢失。"""
+    async def fake_resolve(db_code):
+        return {"sources": {}, "db_code": "x", "ds": MY_DS}
+    monkeypatch.setattr(tools, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(tools.workspace, "_resolve_datasource", fake_resolve)
+    monkeypatch.setattr(tools, "explain_query_impl",
+                        lambda *a, **k: {"plan": "x",
+                                         "note": "EXPLAIN ANALYZE 已真实执行该 SELECT"})
+    r = asyncio.run(tools.explain_query("SELECT 1", ctx=None))
+    assert "EXPLAIN ANALYZE 已真实执行该 SELECT" in r["note"]   # 原 note 还在
+    assert "PLAN_TABLE" in r["note"]                            # 豁免说明也在
+
+
+def test_export_direct_path_note_blames_connection_not_database(monkeypatch, tmp_path):
+    """M1：直连路径的 note 必须归因给"专用连接"，不能说成"库不支持该语法"——
+    那会让模型告诉用户他们的数据库不支持只读兜底，而事实并非如此。"""
+    c = RowConn(rows=2)
+    monkeypatch.setattr(csvio, "_open_direct_connection_with_timeout", lambda *a, **k: c)
+    out = csvio.export_csv_impl("SELECT * FROM t", str(tmp_path / "o.csv"),
+                                MY_DS, "x", timeout=60)
+    assert out["read_only_enforced"] is False
+    assert "专用连接" in out["note"]
+    assert "库不支持" not in out["note"]

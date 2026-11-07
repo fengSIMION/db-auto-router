@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from db_auto_router import sqlparse
-from db_auto_router.sqlparse import validate_read_statement_ast as v
+from db_auto_router import astguard
+from db_auto_router.astguard import validate_read_statement_ast as v
 
 ALL = ["mysql", "postgres", "gaussdb", "oracle", "dm"]
 
@@ -18,7 +18,7 @@ ALL = ["mysql", "postgres", "gaussdb", "oracle", "dm"]
 # 1. 方言映射 ---------------------------------------------------------------
 
 def test_dialect_map_covers_five_dialects():
-    assert sqlparse.DIALECT_MAP == {"mysql": "mysql", "postgres": "postgres",
+    assert astguard.DIALECT_MAP == {"mysql": "mysql", "postgres": "postgres",
                                     "gaussdb": "postgres", "oracle": "oracle", "dm": "oracle"}
 
 
@@ -103,15 +103,32 @@ def test_abstains_on_unmapped_dialect():
 
 @pytest.mark.parametrize("dialect,sql", [
     ("postgres", "SELECT pg_read_file('/etc/passwd')"),
+    ("postgres", "SELECT pg_read_binary_file('/etc/passwd')"),
+    ("postgres", "SELECT pg_ls_dir('/etc')"),
+    ("postgres", "SELECT pg_stat_file('/etc/passwd')"),
+    ("postgres", "SELECT lo_create(0)"),
     ("postgres", "SELECT * FROM dblink('host', 'select 1')"),
     ("postgres", "SELECT pg_sleep(10)"),
     ("postgres", "SELECT nextval('s')"),
     ("mysql", "SELECT LOAD_FILE('/etc/passwd')"),
     ("mysql", "SELECT BENCHMARK(1000000, MD5('x'))"),
+    ("mysql", "SELECT EXTRACTVALUE('<a>x</a>', '/a')"),
+    ("mysql", "SELECT UPDATEXML('<a>x</a>', '/a', 'y')"),
 ])
 def test_rejects_dangerous_functions(dialect, sql):
     with pytest.raises(PermissionError):
         v(sql, dialect)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT UTL_HTTP.REQUEST('http://169.254.169.254/') FROM DUAL",
+    "SELECT UTL_INADDR.GET_HOST_ADDRESS('x') FROM DUAL",
+])
+def test_rejects_oracle_package_ssrf_functions(sql):
+    """Oracle 包限定函数在 sqlglot 里只剩函数名（实测 UTL_HTTP.REQUEST → 'REQUEST'），
+    AST 匹配不到，改用文本标记。漏了它就是漏一个直打云元数据地址的 SSRF 向量。"""
+    with pytest.raises(PermissionError):
+        v(sql, "oracle")
 
 
 def test_unknown_function_abstains():
@@ -130,16 +147,35 @@ def test_deep_nesting_rejected():
         v("SELECT " + "(" * 200 + "1" + ")" * 200, "mysql")
 
 
+def test_recursion_error_reported_as_depth_not_dialect():
+    """sqlglot 在 CASE 嵌套约 55 深就 RecursionError，早于括号深度预检的 100。
+    这时说"方言边缘语法"是把实现限制伪装成用户 SQL 的问题（A2 同款错告）。"""
+    sql = "SELECT " + "CASE WHEN 1 THEN " * 60 + "1" + " END" * 60
+    with pytest.raises(PermissionError) as ei:
+        v(sql, "mysql")
+    assert "嵌套过深" in str(ei.value)
+    assert "方言边缘语法" not in str(ei.value)   # 不许把实现限制说成方言问题
+
+
+def test_pathological_escape_works_for_export_channel():
+    """病态预检的逃生门不能一律指向 execute——export_csv 的活 execute 干不了，
+    该给的建议是拆批（大 IN 列表、大结果集正是 export 的存在理由）。"""
+    sql = "SELECT " + ",".join(f"c{i}" for i in range(20000)) + " FROM t"
+    with pytest.raises(PermissionError) as ei:
+        v(sql, "mysql")
+    assert "拆" in str(ei.value)
+
+
 # 10. 降级路径 --------------------------------------------------------------
 
 def test_missing_sqlglot_degrades(monkeypatch):
-    monkeypatch.setattr(sqlparse, "_SQLGLOT", None)          # 模拟导入失败后的状态
-    monkeypatch.setattr(sqlparse, "_sqlglot_probe_failed", True)
+    monkeypatch.setattr(astguard, "_SQLGLOT", None)          # 模拟导入失败后的状态
+    monkeypatch.setattr(astguard, "_sqlglot_probe_failed", True)
     v("DELETE FROM t", "mysql")  # 第二层关闭 → 不抛，交给第一层
 
 
 def test_guard_switch_off(monkeypatch):
-    monkeypatch.setattr(sqlparse, "AST_GUARD", "off")
+    monkeypatch.setattr(astguard, "AST_GUARD", "off")
     v("DELETE FROM t", "mysql")
 
 
