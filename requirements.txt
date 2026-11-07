@@ -13,6 +13,9 @@ python-dotenv>=1.0
 # ---- MCP 协议层（官方 SDK，2.x 起 FastMCP 改名 MCPServer，见 tests/test_mcp2_startup.py）----
 mcp>=2,<3
 
+# ---- 只读通道第二层：SQL AST 解析（懒加载，缺失时该层自动关闭并在返回值 note 说明）----
+sqlglot>=30,<31
+
 # ---- 业务数据库驱动：按需安装，用哪个装哪个 ----
 # MySQL / 达梦(DM) / PostgreSQL / GaussDB / Oracle
 # mysql-connector-python>=8.0     # 查 MySQL

@@ -147,6 +147,9 @@ READ_ONLY_SQL_PREFIXES = {"SELECT", "SHOW", "DESC", "DESCRIBE", "EXPLAIN", "WITH
 # 写操作 SQL 前缀（需要确认）
 WRITE_SQL_PREFIXES = {"INSERT", "DELETE", "UPDATE", "DROP", "TRUNCATE", "ALTER", "CREATE"}
 
+# 只读通道第二层（sqlglot AST 校验）总开关。on=启用；off=只剩正则守卫与数据库只读两层
+AST_GUARD = os.environ.get("MCP_READ_GUARD_AST", "on").strip().lower()
+
 # MCP 服务器信息
 # version 会在 initialize 响应里上报给客户端，也是启动 banner 的版本号——
 # 与 README 标题 / GUI / 启动脚本保持同一个号，别只改一处。
