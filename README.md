@@ -194,10 +194,24 @@ MCP 终端确认。弹窗里附**影响行数预估**——在专用连接上试
 每条 SQL 操作按天落一行 JSON 到 `logs/audit-YYYYMMDD.jsonl`：工具名、数据源、完整 SQL
 （截断到 4000 字符）、状态、耗时、影响行数。`MCP_AUDIT_LOG_DIR=off` 可关闭。
 
-**只读守卫**
+**只读守卫（三层，失败方向全是拒）**
 
-`query` 工具在服务端校验语句，只放行 SELECT/SHOW/DESC/EXPLAIN/WITH；
-`explain_query` 走同一道守卫，`EXPLAIN ANALYZE DELETE ...` 这类会被直接拦下。
+`query` / `export_csv` / `explain_query` 三个只读通道共用三层，全部通过才执行：
+
+1. **正则快速拒**——前缀白名单 + 注释/字符串脱敏 + CTE 写检测 + 加锁子句拦截，
+   `EXPLAIN ANALYZE DELETE ...` 这类剥壳后重新过门
+2. **AST 解析验**——sqlglot 语法树判语句形态（第二意见，不靠枚举关键字），
+   外加高危函数集（`pg_read_file` / `dblink` / `nextval` / `BENCHMARK` 这类
+   "形态是 SELECT 但函数有副作用"的语句，正则和 AST 都容易漏的一类）
+3. **数据库只读兜底**——查询时让数据库自己进入只读状态（MySQL/PG/GaussDB/Oracle/达梦
+   各有各的开法），服务端字符串判错了数据库也不让改
+
+任何一层不可用时**如实降级并在返回值 `note` 里说明，不假装安全**：AST 判不了的
+语句（如达梦特有语法）放行并标注、库不认只读语法就跳过并标注、sqlglot 没装
+整个第二层关闭并标注。返回值统一带 `read_only_enforced`——它的语义是"数据库级
+兜底有没有兜上"，**不是"有没有保护"**，一二两层仍在工作。
+完整契约与三条豁免路径（事务内 / EXPLAIN / 超时直连）见
+[docs/configuration.md](docs/configuration.md#只读通道三层防线)。
 
 **返回体量硬顶（服务端强制）**
 
