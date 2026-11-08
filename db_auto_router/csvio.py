@@ -15,13 +15,14 @@ from .directconn import _open_direct_connection_with_timeout, _set_conn_autocomm
 from .errutil import safe_cursor
 from .pool import get_connection, put_connection, pool_key_for
 from .readonly import enable_read_only, release_read_only, readonly_field
-from .sqlguard import validate_read_only_sql
+from .sqlguard import validate_read_only_sql, strip_trailing_comments
 from .astguard import validate_read_statement_ast
 from .util import extract_db_and_table_from_sql, parse_cross_db_table, sql_placeholders
 
 
 def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: str,
-                    timeout: Optional[int] = None, max_rows: Optional[int] = None) -> Dict[str, Any]:
+                    timeout: Optional[int] = None, max_rows: Optional[int] = None,
+                    progress_cb=None) -> Dict[str, Any]:
     """流式导出查询结果为 CSV（绕过常规行数限制）。
 
     - 仅允许只读 SQL（复用 validate_read_only_sql 校验，去掉查询工具的 LIMIT 自动追加）
@@ -65,6 +66,25 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
         cap_warning = "\n".join(w for w in (cap_warning, (
             f"⚠️ 请求的 timeout={timeout} 秒超过单次查询超时硬顶 {QUERY_TIMEOUT_MAX} 秒，"
             f"已限制为 {effective_timeout} 秒")) if w)
+
+    # report_progress：先 COUNT 拿精确总数当分母（本地库多扫一遍可接受）；分母再
+    # min(总数, 行数上限)，防"总数远大于上限"时进度条永远走不满。COUNT 包裹这条
+    # 方言不认（如 Oracle 禁 WITH 子查询）就退化成心跳——分母未知但仍报"还活着"，
+    # 绝不因为拿不到总数就卡住导出。
+    prog_total = None
+    if progress_cb is not None:
+        stripped = strip_trailing_comments(sql).rstrip()
+        if stripped.endswith(";"):
+            stripped = stripped[:-1].rstrip()
+        try:
+            with safe_cursor(conn) as _cnt_cur:
+                _cnt_cur.execute(f"SELECT COUNT(*) FROM ({stripped}) _cnt")
+                _row = _cnt_cur.fetchone()
+                if _row and _row[0] is not None:
+                    prog_total = min(int(_row[0]), cap)
+        except Exception:
+            prog_total = None  # 退化心跳
+
     total = 0
     columns: List[str] = []
     start_time = time.time()
@@ -94,10 +114,14 @@ def export_csv_impl(sql: str, file_path: str, ds: Dict[str, str], default_db: st
                             break
                         writer.writerow(["" if v is None else v for v in row])
                         total += 1
+                    if progress_cb is not None:
+                        progress_cb(total, prog_total)
                     if truncated:
                         break
         execution_time_ms = round((time.time() - start_time) * 1000, 2)
         os.replace(tmp_path, out_path)
+        if progress_cb is not None:
+            progress_cb(total, prog_total, final=True)
         result = {
             "success": True,
             "file_path": str(out_path.resolve()),

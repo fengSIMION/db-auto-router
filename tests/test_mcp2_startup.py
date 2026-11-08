@@ -8,7 +8,7 @@ ModuleNotFoundError（墓碑模块带迁移提示）。
 
 本测试钉住三件事，任何一件回归都意味着「新机器装上就跑不起来」：
   1. server 模块可导入（旧代码在 2.x 上必崩在这一步）
-  2. 17 个工具全部注册且可列举
+  2. 18 个工具全部注册且可列举
   3. initialize 上报的 version 是项目版本，不被 SDK 自己的版本号顶替
 """
 import asyncio
@@ -44,9 +44,9 @@ expected = sorted([
     "query", "execute", "list_datasources", "refresh_datasources", "search_tables",
     "get_schema_info", "begin_transaction", "commit_transaction", "rollback_transaction",
     "list_transactions", "extend_transaction", "export_csv", "import_csv",
-    "dump_database", "query_audit_log", "explain_query", "slow_queries",
+    "dump_database", "query_audit_log", "explain_query", "slow_queries", "db_health",
 ])
-chk("17 个工具全部注册", names == expected, "→ %d 个: %s" % (len(names), names))
+chk("18 个工具全部注册", names == expected, "→ %d 个: %s" % (len(names), names))
 
 print("=== 3. version 上报（低层 Server 的 version 字段）===")
 # 1.x 是 FastMCP._mcp_server，2.x 是 MCPServer._lowlevel_server；

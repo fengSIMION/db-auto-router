@@ -21,7 +21,7 @@ from .tools import (query, execute, list_datasources, refresh_datasources, searc
                     get_schema_info, begin_transaction, commit_transaction,
                     rollback_transaction, list_transactions, extend_transaction,
                     export_csv, import_csv, query_audit_log, dump_database,
-                    explain_query, slow_queries, cleanup_old_audit_logs)
+                    explain_query, slow_queries, db_health, cleanup_old_audit_logs)
 
 # ------------------------------------------------------------------------------
 # MCPServer 实例 (官方 mcp SDK 2.x 接管协议层：stdio 传输/握手/版本协商/错误码)
@@ -54,11 +54,12 @@ def _register_tools():
         "query_audit_log": ToolAnnotations(title="查询审计日志", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
         "explain_query": ToolAnnotations(title="执行计划与诊断", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
         "slow_queries": ToolAnnotations(title="慢查询与在跑语句", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
+        "db_health": ToolAnnotations(title="索引卫生检查", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
     }
     for fn in (query, execute, list_datasources, refresh_datasources, search_tables, get_schema_info,
                begin_transaction, commit_transaction, rollback_transaction, list_transactions,
                extend_transaction, export_csv, import_csv, dump_database, query_audit_log,
-               explain_query, slow_queries):
+               explain_query, slow_queries, db_health):
         mcp.add_tool(
             fn,
             name=fn.__name__,

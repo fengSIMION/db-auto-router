@@ -18,7 +18,8 @@ from .sqlguard import validate_read_only_sql, check_sql_limit, strip_trailing_co
 from .util import extract_db_and_table_from_sql
 
 def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
-                            max_rows: Optional[int] = None, timeout: Optional[int] = None) -> Any:
+                            max_rows: Optional[int] = None, timeout: Optional[int] = None,
+                            progress_cb=None) -> Any:
     """执行只读查询（无需确认），支持跨库语法 + 大数据量保护 + 重试机制 + 自动摘要 + 执行耗时
 
     参数：
@@ -52,6 +53,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     suggested_limit = limit_info["suggested_limit"]
     has_limit = limit_info["has_limit"]
     existing_limit = limit_info["existing_limit"]
+
+    # report_progress 分母：用户手写了 LIMIT → 确定性（total = min(LIMIT, 行数硬顶））；
+    # 没写 LIMIT（引擎自动注入的那个是保护帽、不是真实总数）→ 心跳（total=None）。
+    prog_total = min(existing_limit, effective_max_rows) if (has_limit and existing_limit) else None
 
     # 如果需要保护，自动追加行数限制（避免大结果集导致达梦等驱动游标异常 Not Open，并让摘要机制生效）
     limit_warning = None
@@ -131,6 +136,9 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
                                 break
                             result_data.extend([dict(zip(columns, row)) for row in rows])
                             rows_fetched += len(rows)
+                            # 批次级进度上报（节流在 tools.py 的 reporter 里做，这里如实报）
+                            if progress_cb is not None:
+                                progress_cb(len(result_data), prog_total)
 
                             # 行数硬上限对"有无 LIMIT"一律生效：显式 LIMIT 99999999 这类写法
                             # 之前会绕过保护把大表整表拉进内存，现在同样只保留 effective_max_rows 行
@@ -184,6 +192,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
         if direct_conn is not None:
             # 专用超时连接用完即关（整个重试过程只关一次）
             safe_close(direct_conn)
+
+    # 成功走完：补一条 final 进度（确定性场景落到 100%，心跳场景标示结束）
+    if progress_cb is not None:
+        progress_cb(len(result_data), prog_total, final=True)
 
     # 结果自动摘要：超过阈值时只返回部分数据 + 统计信息
     # （dialect 已在连接前算好，第三层要用）

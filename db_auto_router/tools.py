@@ -21,7 +21,7 @@ from mcp.server.mcpserver import Context
 
 from .config import (AUDIT_ENABLED, AUDIT_LOG_DIR, AUDIT_SCAN_DAYS,
                      AUDIT_RETAIN_DAYS, MAX_POOL_SIZE, WRITE_CONFIRM_MODE,
-                     WRITE_ESTIMATE_MODE)
+                     WRITE_ESTIMATE_MODE, QUERY_TIMEOUT_MAX)
 from .logcfg import logger
 from .errors import ToolFailure
 from .audit import audit_log
@@ -35,6 +35,7 @@ from .sqlguard import (split_sql_statements, is_ddl_operation,
 from .astguard import validate_read_statement_ast
 from .readonly import readonly_field, merge_note
 from .readengine import execute_read_only_query
+from .progress import make_progress_reporter
 from .writeengine import execute_any_sql, estimate_affected_rows
 from .transactions import (begin_transaction_impl, execute_in_transaction, _end_transaction,
                            _cleanup_expired_transactions, list_active_transactions,
@@ -42,6 +43,7 @@ from .transactions import (begin_transaction_impl, execute_in_transaction, _end_
 from .csvio import export_csv_impl, import_csv_impl, count_csv_rows
 from .introspection import get_table_schema, search_tables_by_keyword
 from .explain import explain_query_impl, slow_queries_impl
+from .dbhealth import db_health_impl
 from .confirm import _confirm_write_if_needed
 from . import dump as dump_module
 
@@ -121,8 +123,13 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
                 result_data.update(readonly_field(
                     result_data.get("dialect", ""), False, exempt_reason="txn"))
         else:
+            # report_progress：把 ctx 变成进度回调传进引擎（线程→循环桥 + 节流在
+            # progress.py）。ctx 为 None（内部调用/测试）时退成 no-op，不影响执行。
+            loop = asyncio.get_running_loop()
+            progress_cb = make_progress_reporter(loop, ctx.report_progress if ctx else None)
             result_data = await _run_db(execute_read_only_query, sql, resolved["ds"],
-                                        resolved["db_code"], max_rows=max_rows, timeout=timeout)
+                                        resolved["db_code"], max_rows=max_rows, timeout=timeout,
+                                        progress_cb=progress_cb)
         audit_log("query", resolved["db_code"], sql, status="ok",
                   execution_time_ms=result_data.get("execution_time_ms") if isinstance(result_data, dict) else None,
                   rows=result_data.get("total_rows") if isinstance(result_data, dict) else None, txn_id=txn_id)
@@ -141,8 +148,8 @@ async def query(sql: str, db_code: Optional[str] = None, max_rows: Optional[int]
         raise ToolFailure(f"{type(e).__name__}: {e}")
 
 
-async def execute(sql: str, db_code: Optional[str] = None, txn_id: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
-    """执行任意SQL语句（包括INSERT/UPDATE/DELETE等写操作）。写操作执行前会弹出确认框，用户确认后才真正执行（服务端强制，无法绕过）；数据源配置里取消打勾「写操作需人工审核」的开发库除外（免确认）。支持跨库查询语法。支持多语句批量执行：用分号分隔多条 SQL 会一次确认、顺序执行、全部成功才提交（边界：纯 DML 批保证原子性、任一失败整批回滚；批内混入 DDL 时 mysql/oracle/达梦的 DDL 隐式提交、无法随批回滚，此时返回值带 atomicity=false 与 atomicity_note，确认弹窗也会提前警示，MUST NOT 对用户说"整批回滚"）；CREATE PROCEDURE/FUNCTION/TRIGGER 等带 BEGIN...END 体的语句整条执行。返回值包含 execution_time_ms（执行耗时毫秒数）；批量时含 batch/total_affected_rows/details。txn_id 参数可在指定事务中执行（配合 begin_transaction）。"""
+async def execute(sql: str, db_code: Optional[str] = None, txn_id: Optional[str] = None, timeout: Optional[int] = None, ctx: Context = None) -> dict[str, Any]:
+    """执行任意SQL语句（包括INSERT/UPDATE/DELETE等写操作）。写操作执行前会弹出确认框，用户确认后才真正执行（服务端强制，无法绕过）；数据源配置里取消打勾「写操作需人工审核」的开发库除外（免确认）。支持跨库查询语法。支持多语句批量执行：用分号分隔多条 SQL 会一次确认、顺序执行、全部成功才提交（边界：纯 DML 批保证原子性、任一失败整批回滚；批内混入 DDL 时 mysql/oracle/达梦的 DDL 隐式提交、无法随批回滚，此时返回值带 atomicity=false 与 atomicity_note，确认弹窗也会提前警示，MUST NOT 对用户说"整批回滚"）；CREATE PROCEDURE/FUNCTION/TRIGGER 等带 BEGIN...END 体的语句整条执行。返回值包含 execution_time_ms（执行耗时毫秒数）；批量时含 batch/total_affected_rows/details。txn_id 参数可在指定事务中执行（配合 begin_transaction）。timeout(可选,仅非事务执行生效:抬 PG/GaussDB 服务端 statement_timeout 到至多 N 秒,防默认 30s 杀长 DDL;受 MCP_QUERY_TIMEOUT_MAX 硬顶,超顶夹回并在 warning 说明;MySQL/Oracle/达梦无服务端写超时可调,此参数对其无效;事务内执行不适用)。"""
     if ctx is not None:
         await _discover_workspace_dir(ctx)
     if not sql:
@@ -193,10 +200,22 @@ async def execute(sql: str, db_code: Optional[str] = None, txn_id: Optional[str]
                                            force_confirm=True, estimate=estimate,
                                            write_confirm=need_confirm,
                                            atomicity_warning=atomicity_warning)
+        # timeout 仅对非事务执行生效：抬 PG/GaussDB 服务端 statement_timeout（防默认
+        # 30s 杀长 DDL）。夹到 QUERY_TIMEOUT_MAX 硬顶，夹了要在返回值说，不默默改。
+        timeout_ms = None
+        timeout_clamped = False
+        if timeout and int(timeout) > 0:
+            timeout_clamped = int(timeout) > QUERY_TIMEOUT_MAX
+            timeout_ms = min(int(timeout), QUERY_TIMEOUT_MAX) * 1000
         if txn_id:
             result_data = await _run_db(execute_in_transaction, txn_id, sql)
         else:
-            result_data = await _run_db(execute_any_sql, sql, resolved["ds"], resolved["db_code"])
+            result_data = await _run_db(execute_any_sql, sql, resolved["ds"],
+                                        resolved["db_code"], timeout_ms=timeout_ms)
+        if timeout_clamped and isinstance(result_data, dict):
+            result_data["warning"] = (
+                f"⚠️ 请求的 timeout={timeout} 秒超过单次超时硬顶 {QUERY_TIMEOUT_MAX} 秒，"
+                f"已限制为 {min(int(timeout), QUERY_TIMEOUT_MAX)} 秒")
         # 标注 DDL 类型，供 skill 层安全确认
         if isinstance(result_data, dict):
             result_data["is_ddl"] = has_ddl
@@ -314,8 +333,12 @@ async def export_csv(sql: str, file_path: str, db_code: Optional[str] = None, ti
     try:
         resolved = await workspace._resolve_datasource(db_code)
         resolved_db_code = resolved["db_code"]
+        # report_progress：同 query，把 ctx 变成进度回调传进导出引擎
+        loop = asyncio.get_running_loop()
+        progress_cb = make_progress_reporter(loop, ctx.report_progress if ctx else None)
         result = await _run_db(export_csv_impl, sql, file_path, resolved["ds"],
-                               resolved["db_code"], timeout=timeout, max_rows=max_rows)
+                               resolved["db_code"], timeout=timeout, max_rows=max_rows,
+                               progress_cb=progress_cb)
         audit_log("export_csv", resolved["db_code"], sql, status="ok",
                   execution_time_ms=result.get("execution_time_ms"), rows=result.get("rows_exported"),
                   detail=f"file={result.get('file_path')}")
@@ -661,6 +684,27 @@ async def slow_queries(db_code: Optional[str] = None, limit: int = 20, include_r
         raise
     except Exception as e:
         _audit_error("slow_queries", resolved_db_code, "slow_queries", e)
+        raise ToolFailure(f"{type(e).__name__}: {e}")
+
+
+async def db_health(db_code: Optional[str] = None, ctx: Context = None) -> dict[str, Any]:
+    """索引卫生检查（只读诊断，绝不自动删）。返回 redundant_indexes（冗余：最左前缀/完全重复，结构判定，高置信）与 unused_indexes（观测窗口内零扫描的未用候选，低置信，删前务必确认）。每条附 table/index/columns/covered_by/suggestion/drop_sql。各方言尽力而为：PG 用 pg_stat_user_indexes，MySQL 用 performance_schema，Oracle/达梦用 V$OBJECT_USAGE（需先 ALTER INDEX ... MONITORING USAGE）；缺统计/缺权限时在 note 说明并跳过对应检查，不假装有结果。唯一/主键索引提供约束，永不判为可删。"""
+    if ctx is not None:
+        await _discover_workspace_dir(ctx)
+    resolved_db_code = db_code or ""
+    try:
+        resolved = await workspace._resolve_datasource(db_code)
+        resolved_db_code = resolved["db_code"]
+        result_data = await _run_db(db_health_impl, resolved["ds"], resolved["db_code"])
+        audit_log("db_health", resolved["db_code"], "db_health", status="ok",
+                  detail=(f"redundant={len(result_data.get('redundant_indexes', []))};"
+                          f"unused={len(result_data.get('unused_indexes', []))}"))
+        return _normalize_result(result_data)
+    except ToolFailure as e:
+        _audit_error("db_health", resolved_db_code, "db_health", e)
+        raise
+    except Exception as e:
+        _audit_error("db_health", resolved_db_code, "db_health", e)
         raise ToolFailure(f"{type(e).__name__}: {e}")
 
 

@@ -10,13 +10,30 @@ from .config import MAX_RETRY_COUNT, RETRY_DELAY, MAX_RESULT_ROWS, SUMMARY_DISPL
 from .directconn import _open_direct_connection, _set_conn_autocommit
 from .errutil import is_transient_error, safe_close, safe_cursor
 from .logcfg import logger
-from .pool import get_connection, put_connection
+from .pool import get_connection, put_connection, discard_connection
 from .sqlguard import split_sql_statements, is_ddl_operation, ddl_breaks_transaction
 from .util import extract_db_and_table_from_sql
 
 
+# PG/GaussDB 的服务端语句超时恢复语句（RESET 回会话默认，不把读回来的值写回）
+_PG_RESET_STMT_TIMEOUT = "RESET statement_timeout"
+
+
+def statement_timeout_sql(dialect: str, timeout_ms) -> Optional[str]:
+    """返回"设服务端语句超时"的 SQL；方言不支持或未传超时则 None。
+
+    只有 PG/GaussDB 有服务端 statement_timeout（默认 30s，会杀长 DDL）——抬它即可
+    让长写跑完。MySQL 的 max_execution_time 仅对 SELECT 生效、动不了 DDL/写；
+    Oracle/达梦无对应项，本来就没有"30s 杀写"的问题，故无需设。
+    """
+    if timeout_ms and int(timeout_ms) > 0 and (dialect or "").lower().strip() in ("postgres", "gaussdb"):
+        return f"SET statement_timeout = {int(timeout_ms)}"
+    return None
+
+
 def execute_any_sql(sql: str, ds: Dict[str, str], default_db: str,
-                    conn: Any = None, auto_commit: bool = True) -> Any:
+                    conn: Any = None, auto_commit: bool = True,
+                    timeout_ms: Optional[int] = None) -> Any:
     """执行任意SQL（包括写操作），支持跨库语法 + 执行耗时 + 多语句批量
 
     安全设计：SQL 执行阶段绝不重试——若 commit 已成功但响应阶段失败（超时/断连），
@@ -63,6 +80,18 @@ def execute_any_sql(sql: str, ds: Dict[str, str], default_db: str,
                     raise
         if is_multi:
             _set_conn_autocommit(conn, ds.get("db_type", "").lower().strip(), False)
+
+    # 服务端语句超时（仅 PG/GaussDB）：抬 statement_timeout 防默认 30s 杀长 DDL。
+    # 只对池连接负责恢复；事务连接是专用的、随事务结束关闭，无需 RESET。
+    _stmt_timeout_sql = statement_timeout_sql(dialect, timeout_ms)
+    _stmt_timeout_set = False
+    if _stmt_timeout_sql:
+        try:
+            with safe_cursor(conn) as cur:
+                cur.execute(_stmt_timeout_sql)
+            _stmt_timeout_set = True
+        except Exception as e:
+            logger.warning(f"设置 statement_timeout 失败（继续执行，可能仍受默认 30s 限制）: {e}")
 
     # 阶段2：执行 SQL（绝不重试，防止 commit 后失败导致重复写入）
     current_idx = 0
@@ -146,7 +175,16 @@ def execute_any_sql(sql: str, ds: Dict[str, str], default_db: str,
             # 只在成功路径恢复的话，批量失败后连接会带着 autocommit=False 回到池里，
             # 停留在隐式事务态，未提交的锁一直持有到 idle 超时（默认 300s）。
             _set_conn_autocommit(conn, dialect, True)
-        if owns_conn:
+        # 恢复 statement_timeout（必须先于归还）：失败则弃连接，不把改过的会话还给池
+        if _stmt_timeout_set and owns_conn:
+            try:
+                with safe_cursor(conn) as cur:
+                    cur.execute(_PG_RESET_STMT_TIMEOUT)
+            except Exception as e:
+                logger.error(f"恢复 statement_timeout 失败，连接已弃（不回池）: {e}")
+                discard_connection(ds, conn, target_db if is_cross_db else None)
+                conn = None      # 标记已弃，下面不再 put
+        if owns_conn and conn is not None:
             # 借出的池连接必须归还。此前没有归还 API，连接被永久留在池里，
             # 导致同 key 的并发调用共用同一条物理连接（见 pool.py 的说明）。
             put_connection(ds, conn, target_db if is_cross_db else None)

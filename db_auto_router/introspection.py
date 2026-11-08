@@ -76,20 +76,25 @@ def _resolve_target(table_name: str, ds: Dict[str, str], default_db: str,
 # ------------------------------------------------------------------------------
 # 4. 表结构查询功能（带重试机制）
 # ------------------------------------------------------------------------------
-def get_table_indexes(table_name: str, ds: Dict[str, str], default_db: str) -> List[Dict]:
+def get_table_indexes(table_name: str, ds: Dict[str, str], default_db: str, conn=None) -> List[Dict]:
     """查询表的索引信息（带重试机制，大小写不敏感）
 
     返回字段：index_name, column_name, is_unique, is_primary, seq_in_index, index_type, comment
+
+    conn 传入时复用调用方已借好的连接（不自行借用/归还，生命周期归调用方）；
+    为 None 时自行借用、按瞬时错误重试、用完归还（原行为）。
     """
     conn_db, real_table, schema = _resolve_target(table_name, ds, default_db,
                                                   ds.get("db_type", "").lower().strip())
     db_type = ds.get("db_type", "").lower().strip()
 
+    own = conn is None  # 连接是否由本函数持有（决定 finally 是否归还）
     for retry in range(MAX_RETRY_COUNT):
-        conn = None
+        active = conn
         try:
-            conn = get_connection(ds, conn_db)
-            with safe_cursor(conn) as cursor:
+            if active is None:
+                active = get_connection(ds, conn_db)
+            with safe_cursor(active) as cursor:
                 if db_type == "mysql":
                     cursor.execute("""
                         SELECT TABLE_NAME FROM information_schema.TABLES
@@ -215,25 +220,30 @@ def get_table_indexes(table_name: str, ds: Dict[str, str], default_db: str) -> L
         finally:
             # 借出的池连接每轮用完即还（成功 return、瞬时错误重试、永久错误抛错
             # 都走到这）。此前没有归还 API，连接被永久留在池里，同 key 的并发
-            # 调用会共用同一条物理连接。
-            if conn is not None:
-                put_connection(ds, conn, conn_db)
+            # 调用会共用同一条物理连接。传入连接时（own=False）不归还，生命周期归调用方。
+            if own and active is not None:
+                put_connection(ds, active, conn_db)
 
 
-def get_table_constraints(table_name: str, ds: Dict[str, str], default_db: str) -> List[Dict]:
+def get_table_constraints(table_name: str, ds: Dict[str, str], default_db: str, conn=None) -> List[Dict]:
     """查询表的约束信息（带重试机制，大小写不敏感）
 
     返回字段：constraint_name, constraint_type, column_name, referenced_table, referenced_column, delete_rule
+
+    conn 传入时复用调用方已借好的连接（不自行借用/归还，生命周期归调用方）；
+    为 None 时自行借用、按瞬时错误重试、用完归还（原行为）。
     """
     conn_db, real_table, schema = _resolve_target(table_name, ds, default_db,
                                                   ds.get("db_type", "").lower().strip())
     db_type = ds.get("db_type", "").lower().strip()
 
+    own = conn is None  # 连接是否由本函数持有（决定 finally 是否归还）
     for retry in range(MAX_RETRY_COUNT):
-        conn = None
+        active = conn
         try:
-            conn = get_connection(ds, conn_db)
-            with safe_cursor(conn) as cursor:
+            if active is None:
+                active = get_connection(ds, conn_db)
+            with safe_cursor(active) as cursor:
                 if db_type == "mysql":
                     # MySQL 5.7 的 information_schema 三表 JOIN 不会把 WHERE 谓词下推到
                     # 被 join 的视图，于是物化整个 KEY_COLUMN_USAGE（全库 0.85s），
@@ -403,9 +413,9 @@ def get_table_constraints(table_name: str, ds: Dict[str, str], default_db: str) 
         finally:
             # 借出的池连接每轮用完即还（成功 return、瞬时错误重试、永久错误抛错
             # 都走到这）。此前没有归还 API，连接被永久留在池里，同 key 的并发
-            # 调用会共用同一条物理连接。
-            if conn is not None:
-                put_connection(ds, conn, conn_db)
+            # 调用会共用同一条物理连接。传入连接时（own=False）不归还，生命周期归调用方。
+            if own and active is not None:
+                put_connection(ds, active, conn_db)
 
 
 def get_table_schema(table_name: str, ds: Dict[str, str], default_db: str) -> Dict:
@@ -532,8 +542,8 @@ def get_table_schema(table_name: str, ds: Dict[str, str], default_db: str) -> Di
                             'comment': col_comment if col_comment else ''
                         })
 
-                    indexes = get_table_indexes(table_name, ds, default_db)
-                    constraints = get_table_constraints(table_name, ds, default_db)
+                    indexes = get_table_indexes(table_name, ds, default_db, conn=conn)
+                    constraints = get_table_constraints(table_name, ds, default_db, conn=conn)
                     return {"columns": result, "indexes": indexes, "constraints": constraints}
 
                 elif db_type in ("postgres", "gaussdb"):
@@ -600,12 +610,12 @@ def get_table_schema(table_name: str, ds: Dict[str, str], default_db: str) -> Di
                 # 索引/约束查询失败不应拖垮整个 get_schema_info：字段列表才是调用方的核心诉求。
                 # 任一降级时记 warning 并返回空列表，保持 {columns, indexes, constraints} 结构不变。
                 try:
-                    indexes = get_table_indexes(table_name, ds, default_db)
+                    indexes = get_table_indexes(table_name, ds, default_db, conn=conn)
                 except Exception as e:
                     logger.warning(f"获取索引信息失败，降级为空列表: {e}")
                     indexes = []
                 try:
-                    constraints = get_table_constraints(table_name, ds, default_db)
+                    constraints = get_table_constraints(table_name, ds, default_db, conn=conn)
                 except Exception as e:
                     logger.warning(f"获取约束信息失败，降级为空列表: {e}")
                     constraints = []
