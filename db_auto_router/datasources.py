@@ -193,8 +193,8 @@ def check_datasource_conflict(fetch, orig, v, ph="?"):
     if orig != (d, code) and fetch(
             f"SELECT db_code FROM mcp_datasource_config"
             f" WHERE dir_path={ph} AND db_code={ph}", (d, code)):
-        return (f"已存在同目录同数据库名称的记录：目录={d!r}, 数据库名称={code!r}\n\n"
-                f"同一工作目录下，数据库名称不能重复。跨库查询请用 db_code.table 引用，"
+        return (f"已存在同一工作空间下同数据库名称的记录：工作空间={d!r}, 数据库名称={code!r}\n\n"
+                f"同一工作空间下，数据库名称不能重复。跨库查询请用 db_code.table 引用，"
                 f"或换一个数据库名称。")
 
     # 2) 默认唯一。同样排除自己——否则"编辑一条本来就是默认的行"会误报

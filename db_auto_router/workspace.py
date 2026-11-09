@@ -133,13 +133,13 @@ def _no_datasource_message(load_error: Optional[str]) -> str:
     current_dir = _current_dir_text()
     if load_error:
         return (f"没有可用的数据源。加载数据源配置本身就失败了：{load_error}\n\n"
-                f"这不是 dir_path 不匹配的问题——是配置库根本没读到，所以任何目录都"
+                f"这不是 dir_path 不匹配的问题——是配置库根本没读到，所以任何工作空间都"
                 f"匹配不上。请先按上面的原因修复配置库连接（.env 的 MCP_CONFIG_*、"
                 f"MySQL 服务是否启动、配置库是否存在），或检查 MCP 的 stderr 日志。\n"
-                f"当前工作目录：{current_dir}")
-    return (f"没有可用的数据源。当前工作目录未配置数据源，"
-            f"请检查配置库中 mcp_datasource_config 表的 dir_path 是否匹配当前目录\n"
-            f"当前工作目录：{current_dir}")
+                f"当前工作空间：{current_dir}")
+    return (f"没有可用的数据源。当前工作空间未配置数据源，"
+            f"请检查配置库中 mcp_datasource_config 表的 dir_path 是否匹配当前工作空间\n"
+            f"当前工作空间：{current_dir}")
 
 
 def _unknown_datasource_message(db_code: str, sources: Dict[str, Any],

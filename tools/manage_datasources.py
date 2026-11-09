@@ -101,10 +101,10 @@ def cmd_list():
     if not rows:
         print("（空）还没有数据源。运行: python manage_datasources.py add")
         return
-    print(f"{'目录':<40} {'编码':<18} {'类型':<9} {'地址':<24} {'用户':<14} {'Schema':<12} 默认 审核")
+    print(f"{'工作空间':<40} {'编码':<18} {'类型':<9} {'地址':<24} {'用户':<14} {'Schema':<12} 默认 审核")
     print("-" * 140)
     for dir_path, db_name, db_code, db_type, conn_url, db_user, db_schema, is_def, wconf in rows:
-        show_dir = dir_path if dir_path not in ("*", "") else "* (任意目录兜底)"
+        show_dir = dir_path if dir_path not in ("*", "") else "* (任意工作空间兜底)"
         print(f"{show_dir:<40} {db_code:<18} {db_type:<9} {conn_url:<24} {db_user:<14} "
               f"{(db_schema or '-'):<12} {'✓' if is_def == 1 else '':<4} "
               f"{'需审核' if (wconf is None or int(wconf) == 1) else '免审核'}")
@@ -126,7 +126,7 @@ def _ask(prompt, default="", required=False, secret=False):
 
 def cmd_add():
     print("—— 添加数据源（回车采用 [方括号] 默认值）——")
-    dir_path = _ask("工作目录（直接回车=任意目录兜底'*'，多项目才填如 D:\\myproject）", "*", )
+    dir_path = _ask("工作空间（直接回车=任意工作空间兜底'*'，多项目才填如 D:\\myproject）", "*", )
     db_name = _ask("备注名（给自己看）", "")
     db_code = _ask("数据源编码（小写下划线，如 mydb）", "", required=True)
     while True:
@@ -166,7 +166,7 @@ def cmd_add():
             (dir_path, db_name, db_code, db_type, conn_url, db_user, db_password, db_schema, is_def, write_confirm))
         conn.commit()
         print(f"✅ 已添加: {db_code} ({db_type} @ {conn_url})" +
-              ("，任意目录兜底" if dir_path in ("*", "") else f"，目录 {dir_path}"))
+              ("，任意工作空间兜底" if dir_path in ("*", "") else f"，工作空间 {dir_path}"))
         if write_confirm == 0:
             print("   ℹ️ 已标记免人工审核：该数据源的 execute/import_csv/dump_database 不再弹确认窗"
                   "（审计日志照旧记录）")
@@ -178,7 +178,7 @@ def cmd_add():
                   f"（{'PG' if 'postgres' in db_type or db_type=='gaussdb' else '当前登录用户'}）。"
                   f"若 get_schema_info 查不到表，再补这一列。")
     except sqlite3.IntegrityError:
-        print(f"❌ 已存在同目录同编码的记录: dir_path={dir_path!r}, db_code={db_code!r}")
+        print(f"❌ 已存在同一工作空间下同编码的记录: dir_path={dir_path!r}, db_code={db_code!r}")
     finally:
         conn.close()
 

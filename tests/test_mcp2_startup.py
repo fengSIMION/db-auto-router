@@ -8,7 +8,7 @@ ModuleNotFoundError（墓碑模块带迁移提示）。
 
 本测试钉住三件事，任何一件回归都意味着「新机器装上就跑不起来」：
   1. server 模块可导入（旧代码在 2.x 上必崩在这一步）
-  2. 17 个工具全部注册且可列举
+  2. 18 个工具全部注册且可列举
   3. initialize 上报的 version 是项目版本，不被 SDK 自己的版本号顶替
 """
 import asyncio
@@ -40,13 +40,20 @@ chk("db_auto_router.server 导入成功", S is not None)
 print("=== 2. 工具注册完整性 ===")
 tools = asyncio.run(S.mcp.list_tools())
 names = sorted(t.name for t in tools)
+by_name = {t.name: t for t in tools}
 expected = sorted([
     "query", "execute", "list_datasources", "refresh_datasources", "search_tables",
     "get_schema_info", "begin_transaction", "commit_transaction", "rollback_transaction",
     "list_transactions", "extend_transaction", "export_csv", "import_csv",
-    "dump_database", "query_audit_log", "explain_query", "slow_queries",
+    "dump_database", "query_audit_log", "explain_query", "slow_queries", "db_health",
 ])
-chk("17 个工具全部注册", names == expected, "→ %d 个: %s" % (len(names), names))
+chk("18 个工具全部注册", names == expected, "→ %d 个: %s" % (len(names), names))
+for file_tool in ("export_csv", "dump_database"):
+    ann = by_name[file_tool].annotations
+    chk(f"{file_tool} 标注本地文件写入风险",
+        ann.read_only_hint is False and ann.destructive_hint is True,
+        "→ readOnlyHint=%r, destructiveHint=%r" %
+        (ann.read_only_hint, ann.destructive_hint))
 
 print("=== 3. version 上报（低层 Server 的 version 字段）===")
 # 1.x 是 FastMCP._mcp_server，2.x 是 MCPServer._lowlevel_server；
@@ -55,6 +62,8 @@ low = getattr(S.mcp, "_lowlevel_server", None) or getattr(S.mcp, "_mcp_server", 
 chk("低层 Server.version 等于项目版本",
     getattr(low, "version", None) == MCP_SERVER_INFO["version"],
     "→ %r (期望 %r)" % (getattr(low, "version", None), MCP_SERVER_INFO["version"]))
+chk("v5.0 运行时版本", MCP_SERVER_INFO["version"] == "5.0.0",
+    "→ %r" % MCP_SERVER_INFO["version"])
 
 print()
 print("=" * 56)

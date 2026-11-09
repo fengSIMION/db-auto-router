@@ -25,7 +25,11 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 |---|---|---|
 | `MCP_CONNECT_TIMEOUT` | `10` | 连接超时（秒） |
 | `MCP_READ_TIMEOUT` | `30` | 读取超时（秒） |
+| `MCP_READ_GUARD_AST` | `on` | 只读通道第二层（sqlglot AST 校验）总开关；`off` = 只剩正则守卫与数据库只读两层。sqlglot 未安装时该层自动关闭，**启动时 warning 一次**（它是必装依赖，装好即恢复） |
+| `MCP_READONLY_DB_GUARD` | `on` | 只读通道第三层（数据库只读兜底）总开关；`off` = 只剩前两层。库不认只读语法时该层自动关闭，并在返回值 `note` 里说明 |
+| `MCP_QUERY_TIMEOUT_MAX` | `600` | **超时硬顶（秒）**：`query` / `export_csv` 的 `timeout` 参数不许超过它，超顶夹回并在返回值 `warning` 里说明 |
 | `MCP_MAX_RESULT_ROWS` | `1000` | 无 LIMIT 时的最大返回行数（截断） |
+| `MCP_QUERY_MAX_ROWS_CAP` | `50000` | **行数硬顶**：`query` 的 `max_rows` 参数不许超过它，超顶夹回并在 `warning` 里说明；要更大结果集请用 `export_csv` 落文件 |
 | `MCP_MAX_RETRY_COUNT` / `MCP_RETRY_DELAY` | `3` / `1.0` | 失败重试次数与间隔（秒） |
 | `MCP_MAX_POOL_SIZE` | `10` | 连接池最大连接数 |
 | `MCP_POOL_IDLE_TIME` | `300` | 连接最大空闲时间（秒），定期清理 |
@@ -61,7 +65,7 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `MCP_EXPORT_BATCH` / `MCP_IMPORT_BATCH` | `2000` / `500` | 每批从游标读取 / executemany 提交的行数 |
-| `MCP_EXPORT_MAX_ROWS` | `5000000` | 导出/导入行数硬上限（防爆盘） |
+| `MCP_EXPORT_MAX_ROWS` | `5000000` | 导出/导入行数硬上限（防爆盘）。`export_csv` 的 `max_rows` 参数**只能把上限调小、不能调大**——超过它会被夹回并在 `warning` 里说明 |
 | `MCP_AUDIT_LOG_DIR` | `logs` | 日志目录；`off` = 关闭审计 |
 | `MCP_AUDIT_LOG_SCAN_DAYS` | `30` | `query_audit_log` 默认扫描最近几天的文件（按文件名日期判定，不看 mtime）；传 `0` 不限 |
 | `MCP_AUDIT_LOG_RETAIN_DAYS` | `0` | `>0` 时启动时删除更早的日志文件；`0` = 永久保留 |
@@ -105,6 +109,38 @@ mysql 模式初始化：在配置库执行 `docs/mysql_config.sql`，或双击 `
 - 自动诊断只在表格格式（MySQL TRADITIONAL / PG TEXT）下进行；`FORMAT=JSON/TREE` 时
   `warnings` 为空并在 `note` 里说明跳过——**不是"没问题"**
 - Oracle 无 `EXPLAIN ANALYZE` 等价物，降级为普通计划；达梦未经真机验证，降级并在 `note` 说明
+
+## 只读通道三层防线
+
+`query` / `export_csv` / `explain_query` 三个只读通道共用三层，全部通过才执行，
+任何一层拒绝即拒绝，任何一层不可用时**如实降级并在返回值说明，不假装安全**：
+
+| 层 | 是什么 | 判不了怎么办 |
+|---|---|---|
+| 一、正则快速拒 | `sqlguard.validate_read_only_sql`：前缀白名单 + 注释/字符串脱敏 + CTE 写检测 + 加锁子句 + `EXPLAIN ANALYZE` 剥壳重过门 | 无"判不了"状态——漏判即放行，这是它被加强的原因 |
+| 二、AST 解析验 | `sqlparse.validate_read_statement_ast`：sqlglot 语法树判语句形态 + 高危函数集（`pg_read_file`/`dblink`/`nextval`/`BENCHMARK` 等）。mysql/postgres/oracle 用原生方言，达梦→oracle、GaussDB→postgres 近似映射 | **弃权放行**：`EXPLAIN`/`SHOW` 在 PG/GaussDB/Oracle/达梦上 sqlglot 建模不了（回落 `exp.Command`），株连拒绝会把 `explain_query` 死在四个方言上。方言未映射、sqlglot 未安装同样弃权 |
+| 三、数据库只读 | `readonly.enable_read_only`：查询时让数据库自己进入只读状态。MySQL `START TRANSACTION READ ONLY`（事务级）、PG/GaussDB `SET default_transaction_read_only=on`（会话级，读原值后恢复）、Oracle/达梦 `SET TRANSACTION READ ONLY`（事务级） | **自动降级**：库不认只读语法 → 记能力缓存并跳过，返回值 `note` 说明。能力缓存只记"明确拒绝"，瞬时故障不记——MCP 进程活数天，一次网络抖动不该让该层整周失效 |
+
+开关：`MCP_READ_GUARD_AST`（第二层）、`MCP_READONLY_DB_GUARD`（第三层），均为 `on`/`off`。
+
+### read_only_enforced 契约
+
+三个工具的成功返回都带 `read_only_enforced`（错误返回不带——执行没发生，无从谈生效）：
+
+- `true` = 数据库只读层已生效：enable 语句被该库接受，且作用于本次语句所在事务
+- `false` = 该库不支持 / 本条路径豁免（附 `note` 说明原因），**一二两层仍在工作**
+
+该字段**不承诺"写操作绝无可能"**：MySQL 的 DDL 会隐式提交逃出只读事务，
+第三层的定位是"一二层漏判时的 DML 兜底"，不是绝对边界。绝对边界仍是第一层
+前缀白名单 + 数据库账号权限。
+
+三条豁免路径及各自的 `note`：
+
+| 路径 | 为什么豁免 |
+|---|---|
+| `query(..., txn_id=...)` | 在飞的事务上开只读，MySQL 会**隐式提交用户未提交的工作**（数据事故级）；Oracle/达梦要求只读标记必须是事务首语句 |
+| `explain_query` | Oracle/达梦的 `EXPLAIN PLAN FOR` 要写 PLAN_TABLE，只读事务里必报错 |
+| `export_csv(timeout=...)` | 走专用连接、用完即关，没有"标记泄漏给下一个借用者"的风险 |
 
 `slow_queries` 按方言尽力而为，拿不到就在 `note` 里说清缺什么，并回落给出正在执行的语句：
 

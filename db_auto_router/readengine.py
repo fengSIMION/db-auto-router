@@ -7,23 +7,38 @@ import time
 from typing import Dict, Any, Optional
 
 from .config import (MAX_RESULT_ROWS, MAX_RETRY_COUNT, RETRY_DELAY,
-                     READ_TIMEOUT, SUMMARY_THRESHOLD, SUMMARY_DISPLAY_ROWS)
+                     READ_TIMEOUT, SUMMARY_THRESHOLD, SUMMARY_DISPLAY_ROWS,
+                     QUERY_MAX_ROWS_CAP, QUERY_TIMEOUT_MAX, clamp_override)
 from .directconn import _open_direct_connection_with_timeout
 from .errutil import is_transient_error, safe_close, safe_cursor
 from .logcfg import logger
-from .pool import get_connection, put_connection
+from .pool import get_connection, put_connection, pool_key_for
+from .readonly import enable_read_only, release_read_only, readonly_field
 from .sqlguard import validate_read_only_sql, check_sql_limit, strip_trailing_comments
 from .util import extract_db_and_table_from_sql
 
 def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
-                            max_rows: Optional[int] = None, timeout: Optional[int] = None) -> Any:
+                            max_rows: Optional[int] = None, timeout: Optional[int] = None,
+                            progress_cb=None) -> Any:
     """执行只读查询（无需确认），支持跨库语法 + 大数据量保护 + 重试机制 + 自动摘要 + 执行耗时
 
     参数：
-    - max_rows: 覆盖默认行数上限（MAX_RESULT_ROWS），用于重分析场景需要更多行
-    - timeout: 覆盖默认读超时（READ_TIMEOUT 秒），超时临时创建专用连接执行
+    - max_rows: 覆盖默认行数上限（MAX_RESULT_ROWS），用于重分析场景需要更多行。
+        上限受 QUERY_MAX_ROWS_CAP 硬顶约束，超顶会被夹回去并在返回值 warning 里说明
+    - timeout: 覆盖默认读超时（READ_TIMEOUT 秒），超时临时创建专用连接执行。
+        上限受 QUERY_TIMEOUT_MAX 硬顶约束，同上
     """
-    effective_max_rows = max_rows if (max_rows and max_rows > 0) else MAX_RESULT_ROWS
+    # 硬顶：max_rows/timeout 都是调用方（模型）自己决定传什么的参数，
+    # 不设顶就能传个 10000000 把整份结果集撑爆上下文。夹到顶时必须告知，
+    # 不能默默照做、也不能静默改小。
+    effective_max_rows, rows_clamped = clamp_override(max_rows, MAX_RESULT_ROWS, QUERY_MAX_ROWS_CAP)
+    effective_timeout, timeout_clamped = clamp_override(timeout, READ_TIMEOUT, QUERY_TIMEOUT_MAX)
+    clamp_warning = "\n".join(w for w in (
+        (f"⚠️ 请求的 max_rows={max_rows} 超过单次返回硬顶 {QUERY_MAX_ROWS_CAP} 行，"
+         f"已限制为 {effective_max_rows} 行（更大结果集请用 export_csv 导出到文件）") if rows_clamped else None,
+        (f"⚠️ 请求的 timeout={timeout} 秒超过单次查询超时硬顶 {QUERY_TIMEOUT_MAX} 秒，"
+         f"已限制为 {effective_timeout} 秒") if timeout_clamped else None,
+    ) if w)
 
     # SQL 安全拦截
     validate_read_only_sql(sql)
@@ -38,6 +53,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     suggested_limit = limit_info["suggested_limit"]
     has_limit = limit_info["has_limit"]
     existing_limit = limit_info["existing_limit"]
+
+    # report_progress 分母：用户手写了 LIMIT → 确定性（total = min(LIMIT, 行数硬顶））；
+    # 没写 LIMIT（引擎自动注入的那个是保护帽、不是真实总数）→ 心跳（total=None）。
+    prog_total = min(existing_limit, effective_max_rows) if (has_limit and existing_limit) else None
 
     # 如果需要保护，自动追加行数限制（避免大结果集导致达梦等驱动游标异常 Not Open，并让摘要机制生效）
     limit_warning = None
@@ -66,8 +85,14 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     execution_time_ms = 0.0
     direct_conn = None
     columns: list = []
-    if timeout and timeout > 0 and timeout != READ_TIMEOUT:
-        direct_conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, timeout)
+    dialect = ds.get("db_type", "").lower().strip()
+    # 第三层（数据库只读兜底）的连接身份与生效标记。初始化在循环外：
+    # 循环内每借出一条连接就重开一次，finally 统一恢复；direct_conn 分支不设
+    # （用完即关，无需恢复），此时返回字段为 false + note
+    ro_key = None
+    ro_enforced = False
+    if effective_timeout != READ_TIMEOUT:
+        direct_conn = _open_direct_connection_with_timeout(ds, target_db if is_cross_db else None, effective_timeout)
 
     # 带重试机制执行
     # 外层 try/finally：专用超时连接必须在整个重试过程结束后才关闭一次。
@@ -89,6 +114,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
                 else:
                     conn = get_connection(ds, target_db if is_cross_db else None)
                     pooled_conn = conn
+                    # 第三层：数据库只读兜底。该库不认只读语法就降级，
+                    # 调用方在返回值 note 里说明，不假装安全
+                    ro_key = pool_key_for(ds, target_db if is_cross_db else None)
+                    ro_enforced = enable_read_only(conn, dialect, ro_key)
                 start_time = time.time()
                 # safe_cursor 收拢"取游标→用完关游标"的样板，退出时自动关闭
                 with safe_cursor(conn) as cursor:
@@ -107,6 +136,9 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
                                 break
                             result_data.extend([dict(zip(columns, row)) for row in rows])
                             rows_fetched += len(rows)
+                            # 批次级进度上报（节流在 tools.py 的 reporter 里做，这里如实报）
+                            if progress_cb is not None:
+                                progress_cb(len(result_data), prog_total)
 
                             # 行数硬上限对"有无 LIMIT"一律生效：显式 LIMIT 99999999 这类写法
                             # 之前会绕过保护把大表整表拉进内存，现在同样只保留 effective_max_rows 行
@@ -129,11 +161,16 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
                 error_msg = str(e)
                 # 达梦等驱动在大结果集/游标异常时报 "Not Open" 等不友好错误，重试后仍失败则转友好提示
                 if "not open" in error_msg.lower() and retry >= MAX_RETRY_COUNT - 1:
-                    return {
+                    err_result = {
                         "error": "查询失败：数据库游标异常（常见于结果集过大）",
                         "hint": f"请在 SQL 中显式添加 LIMIT {effective_max_rows} 限制返回行数后重试",
                         "original_error": error_msg
                     }
+                    # 请求被夹过也要在这里说：否则调用方看到的只是"结果集过大"，
+                    # 会拿着同一个 max_rows 反复重试，每次都在同一处失败。
+                    if clamp_warning:
+                        err_result["warning"] = clamp_warning
+                    return err_result
                 # 仅瞬时错误（连接/超时/死锁）重试；语法/权限等永久性错误立即抛出，
                 # 避免每次 SQL 报错白等 2 次重试延迟（db-diagnose 诊断闭环依赖快速拿到错误原文）
                 if retry < MAX_RETRY_COUNT - 1 and is_transient_error(e):
@@ -144,14 +181,24 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
             finally:
                 # 借出的池连接每轮用完即还（成功 break、提前 return、异常重试都走到这）
                 if pooled_conn is not None:
+                    # 恢复必须先于归还：连接一旦回池就可能被别的调用者取走，
+                    # 带着只读标记会让他们后续的 execute 写库失败
+                    if ro_enforced and not release_read_only(
+                            conn, dialect, ro_key, ds, target_db if is_cross_db else None):
+                        pooled_conn = None   # 恢复失败：连接已弃，MUST NOT 回池
+                if pooled_conn is not None:
                     put_connection(ds, pooled_conn, target_db if is_cross_db else None)
     finally:
         if direct_conn is not None:
             # 专用超时连接用完即关（整个重试过程只关一次）
             safe_close(direct_conn)
 
+    # 成功走完：补一条 final 进度（确定性场景落到 100%，心跳场景标示结束）
+    if progress_cb is not None:
+        progress_cb(len(result_data), prog_total, final=True)
+
     # 结果自动摘要：超过阈值时只返回部分数据 + 统计信息
-    dialect = ds.get("db_type", "").lower().strip()
+    # （dialect 已在连接前算好，第三层要用）
 
     # 自动 LIMIT 的提示：只在结果真的触达上限时才给。
     # 聚合查询（SELECT COUNT(*) 只回 1 行）和任何小结果集都被注入了 LIMIT，但毫无影响——
@@ -160,6 +207,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     if auto_limit is not None and not limit_warning and len(result_data) >= auto_limit:
         limit_warning = (f"⚠️ 未指定行数限制，已自动限制返回 {auto_limit} 行，"
                          f"结果可能不完整（如需更多数据请显式指定 LIMIT 或传 max_rows 参数）")
+
+    # 统一出口："参数被夹"与"结果被截断"两类提示合并进同一个 warning 键。
+    # 必须在自动 LIMIT 提示生成之后合成，否则该提示只写进局部变量、不会进入返回值。
+    warning = "\n".join(w for w in (clamp_warning, limit_warning) if w)
 
     if len(result_data) > SUMMARY_THRESHOLD:
         display_rows = result_data[:SUMMARY_DISPLAY_ROWS]
@@ -173,8 +224,9 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
             "execution_time_ms": execution_time_ms,
             "dialect": dialect
         }
-        if limit_warning:
-            summary_info["warning"] = limit_warning
+        if warning:
+            summary_info["warning"] = warning
+        summary_info.update(readonly_field(dialect, ro_enforced))
         return summary_info
 
     # 返回结果，统一为 dict 格式（包含执行耗时和方言）
@@ -184,6 +236,7 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
         "execution_time_ms": execution_time_ms,
         "dialect": dialect
     }
-    if limit_warning:
-        result["warning"] = limit_warning
+    if warning:
+        result["warning"] = warning
+    result.update(readonly_field(dialect, ro_enforced))
     return result

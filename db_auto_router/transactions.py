@@ -109,12 +109,21 @@ def _finish_transaction_locked(info: Dict[str, Any], commit: bool, reason: str =
     conn = info["conn"]
     try:
         if commit:
-            conn.commit()
+            try:
+                conn.commit()
+            except Exception as e:
+                raise RuntimeError(
+                    f"事务提交时连接异常，提交结果未知；数据库可能已提交，也可能未提交。"
+                    f"禁止盲目重试，请按业务主键查询数据库确认最终状态。原始错误: {e}"
+                ) from e
             return "已提交"
         try:
             conn.rollback()
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(
+                f"事务回滚时连接异常，回滚结果未知；连接将关闭，"
+                f"请查询数据库确认最终状态。原始错误: {e}"
+            ) from e
         return f"已回滚（{reason}）" if reason else "已回滚"
     finally:
         try:
@@ -192,7 +201,14 @@ def begin_transaction_impl(ds: Dict[str, str], db_code: str, target_db: str = No
     effective_idle = _resolve_idle_timeout(idle_timeout)
     conn = _open_direct_connection(ds, target_db)
     typ = ds.get("db_type", "").lower().strip()
-    _set_conn_autocommit(conn, typ, False)
+    try:
+        _set_conn_autocommit(conn, typ, False, strict=True)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
     txn_id = f"txn-{uuid.uuid4().hex[:8]}"
     with _txn_lock:
         _transactions[txn_id] = {
@@ -329,7 +345,13 @@ def execute_in_transaction(txn_id: str, sql: str) -> Dict[str, Any]:
                 if _transactions.get(txn_id) is info:
                     _transactions.pop(txn_id)
             # 事务内出错：自动终止事务，防止半提交状态被继续误用。
-            _finish_transaction_locked(info, commit=False, reason="事务内执行失败")
+            try:
+                _finish_transaction_locked(info, commit=False, reason="事务内执行失败")
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    f"事务 {txn_id} 执行失败，且自动回滚结果未知。"
+                    f"原始执行错误: {e}；回滚错误: {rollback_error}"
+                ) from e
             raise RuntimeError(f"事务 {txn_id} 执行失败已自动回滚并终止: {e}") from e
         finally:
             if cursor:

@@ -7,6 +7,12 @@ import db_auto_router.audit as A
 import db_auto_router.transactions as TX
 import db_auto_router.workspace as W
 import db_auto_router.csvio as CV
+# 上面那个环境变量只在 config 尚未被导入时才有效。pytest 按文件名字母序收集，
+# test_limits_cap 等模块先导入 config 之后，环境变量就不再被读取——审计会写进仓库
+# 真实的 logs/：既污染用户的审计日志，也让本测试在真实日志多于一行时必失败
+# （下方用 json.loads 解析整个文件，多一行即 "Extra data"）。
+# 故导入后直接 patch 模块属性，与导入顺序无关。
+A.AUDIT_LOG_DIR = tempfile.mkdtemp(prefix="audit_")
 ok = True
 def chk(label, cond, extra=""):
     global ok
