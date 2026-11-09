@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "check_environment.py"
+POWERSHELL_SCRIPT = ROOT / "tools" / "check_environment.ps1"
 
 
 def _load_checker():
@@ -110,3 +111,7 @@ def test_launcher_runs_environment_check_before_gui():
     assert check_pos >= 0
     assert gui_pos >= 0
     assert check_pos < gui_pos
+
+
+def test_powershell_launcher_uses_utf8_bom_for_windows_powershell_compatibility():
+    assert POWERSHELL_SCRIPT.read_bytes().startswith(b"\xef\xbb\xbf")
