@@ -203,8 +203,12 @@ def _build_connection(
     raise ValueError(f"不支持的数据库类型: {typ}")
 
 
-def _set_conn_autocommit(conn, typ: str, value: bool) -> None:
-    """各方言统一设置 autocommit（尽量兼容）。"""
+def _set_conn_autocommit(conn, typ: str, value: bool, *, strict: bool = False) -> bool:
+    """各方言统一设置 autocommit。
+
+    strict=True 用于显式事务建立：设置失败必须拒绝开启事务，不能只记日志后
+    返回一个实际仍在自动提交的 txn_id。普通连接清理路径保持 best-effort。
+    """
     try:
         if typ == "mysql":
             conn.autocommit = value
@@ -214,9 +218,29 @@ def _set_conn_autocommit(conn, typ: str, value: bool) -> None:
             try:
                 conn.autocommit = value
             except Exception:
-                pass  # oracledb/dmPython 旧版本可能无此属性，退化为手动 commit
+                if strict:
+                    raise
+                return False  # oracledb/dmPython 旧版本可能无此属性
+        if strict:
+            try:
+                actual = bool(conn.autocommit)
+            except Exception as e:
+                raise ToolFailure(
+                    f"无法验证自动提交状态（{typ}），事务未建立: {e}"
+                ) from e
+            if actual != bool(value):
+                state = "开启" if actual else "关闭"
+                raise ToolFailure(
+                    f"自动提交状态仍为{state}（{typ}），事务未建立"
+                )
+        return True
     except Exception as e:
+        if strict:
+            raise ToolFailure(
+                f"无法{'开启' if value else '关闭'}自动提交（{typ}），事务未建立: {e}"
+            ) from e
         logger.warning(f"设置 autocommit={value} 失败（{typ}）: {e}")
+        return False
 
 
 def _open_direct_connection(ds: Dict[str, str], target_db: str = None):

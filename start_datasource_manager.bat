@@ -6,9 +6,10 @@ rem pythonw is located via PATH - so the whole folder can be copied as-is to any
 rem machine with Python installed and this .bat just works.
 rem
 rem What happens on each launch:
-rem   1. locate pythonw.exe (PATH scan, then `where` fallback)
-rem   2. start the GUI (tools\manage_datasources_gui.py)
-rem   3. refresh the desktop shortcut (.lnk) - best effort, never blocks the GUI.
+rem   1. locate pythonw.exe and its matching python.exe
+rem   2. verify required Python packages and offer to install missing ones
+rem   3. start the GUI (tools\manage_datasources_gui.py)
+rem   4. refresh the desktop shortcut (.lnk) - best effort, never blocks the GUI.
 rem      A .lnk stores ABSOLUTE paths so it cannot ship inside the folder;
 rem      rebuilding it on every launch is what makes the folder "copy to a new
 rem      PC and it just works" - nothing to remember, no second script to run.
@@ -33,6 +34,7 @@ cd /d "%~dp0"
 
 setlocal enabledelayedexpansion
 set "PYW="
+set "PY="
 
 rem Fast path: scan PATH with cmd builtins only - no where.exe process spawn
 for %%P in ("%PATH:;=" "%") do (
@@ -55,10 +57,27 @@ if not defined PYW (
   exit /b 1
 )
 
-rem 1) GUI first - it is the product, start it before anything slow
+set "PY=%PYW:pythonw.exe=python.exe%"
+if not exist "%PY%" (
+  echo [ERROR] python.exe was not found next to "%PYW%".
+  pause
+  exit /b 1
+)
+
+rem 1) Check the exact Python environment used by the GUI. Missing packages are
+rem    installed only after an explicit Y confirmation in the PowerShell script.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\check_environment.ps1" -PythonExe "%PY%" -ProjectRoot "%~dp0"
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Environment check did not complete. The GUI was not started.
+  pause
+  exit /b 1
+)
+
+rem 2) Start the GUI after its environment is ready
 start "" "%PYW%" tools\manage_datasources_gui.py
 
-rem 2) then refresh the desktop shortcut: hidden window, output swallowed,
+rem 3) then refresh the desktop shortcut: hidden window, output swallowed,
 rem    failure only hints - never blocks the GUI that is already running.
 powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0tools\new_datasource_shortcut.ps1" >nul 2>&1
 if errorlevel 1 (

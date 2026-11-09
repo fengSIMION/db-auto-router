@@ -1,10 +1,49 @@
 # -*- coding: utf-8 -*-
-"""数据源维护可视化小工具（v4.9 双后端版）
+"""数据源维护可视化小工具（v5.0 双后端版）
 
 用法：python tools/manage_datasources_gui.py 或双击 start_datasource_manager.bat
 可加参数强制后端：--backend sqlite 或 --backend mysql（默认跟随 .env 的 MCP_CONFIG_MODE）
 
 v4.9 变更：
+- 「目录」列改名「工作空间」：列头、编辑弹窗字段标签、提示与复选框统一口径。
+  原列头叫「目录」而弹窗字段叫「工作目录」，同一样东西两个名字；且数据库建表
+  注释里这一列的说明本来就是「工作空间(*或空=任意目录兜底)」（datasources.py
+  的 DDL），workspace.py 也围绕「工作空间」展开——它说明的是这个目录的职责
+  （按它选数据源），不只是个目录。内部标识符（_dir_key/_dir_colors/
+  _shorten_dir）不动，它们对应的是库表字段 dir_path
+- 视觉通道各司其职（本次可读性改造的最终形态，三个通道互不兼职）：
+    底色（DIR_COLORS 第 i 个） = 哪个项目
+    格栅线（_GRID_COLOR）      = 行与行的边界
+    字色（TEXT_COLOR）         = 统一深色，不携带分组信息
+  两条走不通的路都试过并记在 DIR_COLORS / _GRID_COLOR 的注释里，别再改回去：
+  · 字色跟目录走：7 个色相只有深蓝/深紫能在白底过 AA（4.5:1），绿/黄/红/青/灰
+    全部 3.3~4.3:1，再加深就互相分不开——分组要靠面积填充，靠字的笔画无效
+  · 底色组内隔行深浅（DIR_COLORS_DEEP）："同项目同色"的信号被行号稀释，用户
+    反馈"同项目颜色虽然同色但有深浅"，已删；行边界改由加深的格栅线承担
+- 可读性三连降噪（"说不上来但就是不好读"的三个可量化根因）：
+  1) 字色不再跟目录走，统一 TEXT_COLOR 中性深灰。同色系深字压同色系浅底实测只有
+     2.28~3.11:1，低于 WCAG AA 正文的 4.5:1，且每行字色都在变、都发灰发淡，
+     眼睛找不到落点；换成中性深字后 4.74~5.09:1 全部达标，分组差异交给底色色相差
+  2) 取消默认数据源整行加粗。真实配置里 68% 的行都是默认，标记满场等于没有标记，
+     只是把整表压得更沉；默认身份看「默认」列的 ✓
+  3) 工作空间列中段省略（_shorten_dir）：D 盘 16 条路径有 23 字符共同前缀、占最长
+     路径的 37%，每行开头一多半都一样、差异全挤在末尾。改为只留首尾各两段，中间换 …
+     （D:\\workspace\\…\\platform\\sample_service），首尾正是最有信息量的部分
+- 列表加格栅线（行线 + 列线），且行边界全靠它：底色只表示项目（同项目一个色，
+  组内不再隔行深浅），所以线必须真的看得见。ttk 不提供格栅选项，实现是往 item
+  layout 里加 image 元素（_install_grid_style）：横向 8x1、纵向 1x64 的纯色图靠
+  平铺铺满整行整列，列宽行高怎么变线都不断；表头也补了纵线，格栅上下对齐。装上
+  不上（老 Tk）就安静退回无格栅，窗口照常起。线色 #BCC9DC → #64748B：对 7 种项目
+  底色和白底 1.98~2.11:1（原 1.19:1，几乎等于没画，用户反馈"行与行之间没有明显的
+  分界，感觉一团数据"）。回归见 tests/test_gui_grid_lines.py——用对比度而非亮度差
+  钉住"看得见"，亮度差门槛放过过那条隐形线
+- 修复「重置列宽后长目录路径仍被切掉最后一个字」：列宽内容实测原来对所有行都用
+  常规字体（_f_cell）量，而默认数据源整行加粗（default_row tag → _f_bold），
+  粗体比常规宽约 5%——真实配置里 63 字符的目录路径常规量 542px、粗体量 571px，
+  列宽按 542+pad 给到 567px，粗体渲染要 573px，末尾一个字符被切；「重置列宽」
+  每次重算都少算同一笔，所以现象是"重置了还是遮挡"。现改为按每一行**实际渲染的
+  字体**量（_bold 与 _display 逐行对齐，同在 _apply_rows 一个循环里追加），
+  回归见 tests/test_gui_col_widths.py
 - 窗口标题 / 弹窗横幅 / 状态栏改显示短描述（新增 backend.desc_short）：
   SQLite 只显示「SQLite 数据库：datasources.db」，不再顶一长条全路径——标题栏和
   横幅是单行标签，全路径只会被截断。全路径 desc 原样留给诊断类弹窗（读取失败、
@@ -80,6 +119,7 @@ from db_auto_router import config as cfg  # noqa: E402
 import tkinter as tk  # noqa: E402
 from tkinter import ttk, messagebox  # noqa: E402
 from tkinter import font as tkfont  # noqa: E402  列宽内容实测：measure 文本像素宽
+from windows_single_instance import claim_or_restore  # noqa: E402
 
 VALID_TYPES = ("mysql", "dm", "postgres", "gaussdb", "oracle")
 PIP_PKGS = {"mysql": "mysql-connector-python", "dm": "dmPython",
@@ -155,6 +195,72 @@ def _center_on(win, w, h, area):
     h = min(int(h), int(ah * 0.9))
     win.geometry(f"{w}x{h}+{left + max(0, (aw - w) // 2)}"
                  f"+{top + max(0, (ah - h) // 2)}")
+
+
+# 格栅线（行线 + 列线）：**行与行的边界全靠它**——底色只表示项目（同项目一个色，
+# 组内不再隔行深浅），所以线必须真的看得见。ttk 不提供格栅选项，实现见
+# _install_grid_style。
+# 线色 #64748B：对 7 种项目底色和白底都是 1.98~2.11:1——就是数据库客户端表格线
+# 那个可见度。曾经用 #BCC9DC，对最浅的底色只有 1.19:1，几乎等于没画，用户反馈
+# "行与行之间没有明显的分界，感觉一团数据"；也试过用底色深浅代替线，那会让
+# "同项目同色"的信号被行号稀释（见 DIR_COLORS 注释），两条路都试过，线才是对的载体。
+# test_gui_grid_lines.py 用对比度（不是亮度差）钉住"看得见"这条，换色先跑它
+_GRID_COLOR = "#64748B"
+_GRID_STYLE = "Grid.Treeview"
+
+
+def _install_grid_style(style, master):
+    """给 Treeview 装格栅线（行线 + 列线），返回要持有防 GC 的图片。
+
+    ttk 没有格栅选项，做法是往 item layout 里加 image 元素：横向 8x1、纵向
+    1x64 的纯色图，靠 image 元素的平铺铺满整行整列——列宽行高怎么变线都不断。
+    ttk 对每个可见列各画一次 item layout，纵线因此落在每一列右边界；横线每行
+    一条，画在文字下层、目录底色上层，选中行的蓝底照样盖住线。
+
+    线放在文字之前：同一层里后画的盖先画的，顺序反了文字会被线压。
+
+    失败（老 Tk 没有 element_create、put 的平铺语义不同）就返回空 tuple：
+    格栅是增强项，不该让窗口起不来。图片必须由调用方持有——PhotoImage 被 GC
+    掉元素就成了空引用，表现为"线时有时无"。
+    """
+    hline = tk.PhotoImage(master=master, width=8, height=1)
+    hline.put("{" + _GRID_COLOR + "}", to=(0, 0, 8, 1))
+    vline = tk.PhotoImage(master=master, width=1, height=64)
+    vline.put("{" + _GRID_COLOR + "}", to=(0, 0, 1, 64))
+    try:
+        # 同一解释器里装第二次会抛 already exists——元素已在，直接复用
+        try:
+            style.element_create("Grid.hline", "image", hline, sticky="sew")
+            style.element_create("Grid.vline", "image", vline, sticky="nse")
+        except tk.TclError:
+            pass
+        style.layout(_GRID_STYLE + ".Item", [
+            ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Grid.hline", {"sticky": "sew"}),
+                ("Grid.vline", {"sticky": "nse"}),
+                ("Treeitem.indicator", {"sticky": "e"}),
+                ("Treeitem.text", {"sticky": "nswe"}),
+            ]}),
+        ])
+        # 派生样式只改 layout，选项（行高/字体/选中色）仍继承 "Treeview"
+        style.layout(_GRID_STYLE, [
+            (_GRID_STYLE + ".heading", {"sticky": "nswe"}),
+            (_GRID_STYLE + ".tree", {"sticky": "nswe"}),
+        ])
+        # 表头也补纵线，与表格里的列线对齐——否则表头是"敞口"的，格栅只有
+        # 下半截。其余元素照抄 clam 默认表头布局，只插入一条线
+        style.layout(_GRID_STYLE + ".heading", [
+            ("Treeheading.cell", {"sticky": "nswe"}),
+            ("Grid.vline", {"sticky": "nse"}),
+            ("Treeheading.border", {"sticky": "nswe", "children": [
+                ("Treeheading.padding", {"sticky": "nswe"}),
+                ("Treeheading.image", {"sticky": "e"}),
+                ("Treeheading.text", {"sticky": "nswe"}),
+            ]}),
+        ])
+    except tk.TclError:
+        return ()
+    return (hline, vline)
 
 
 # ------------------------------------------------------------------------------
@@ -252,7 +358,7 @@ class SqliteBackend:
             c.commit()
             return True, ""
         except sqlite3.IntegrityError:
-            return False, f"已存在同目录同数据库名称的记录：目录={v['dir']!r}, 数据库名称={v['code']!r}"
+            return False, f"已存在同一工作空间下同数据库名称的记录：工作空间={v['dir']!r}, 数据库名称={v['code']!r}"
         finally:
             c.close()
 
@@ -446,7 +552,7 @@ class MysqlBackend:
         except Exception as e:
             msg = str(e)
             if "Duplicate entry" in msg:
-                return False, f"已存在同目录同数据库名称的记录：目录={v['dir']!r}, 数据库名称={v['code']!r}"
+                return False, f"已存在同一工作空间下同数据库名称的记录：工作空间={v['dir']!r}, 数据库名称={v['code']!r}"
             if not self.has_db_schema() and "db_schema" in msg:
                 return False, ("配置库缺少 db_schema 列，请先在 mcp 库执行：\n"
                                "ALTER TABLE mcp_datasource_config ADD COLUMN db_schema"
@@ -719,13 +825,13 @@ class RecordDialog(tk.Toplevel):
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
         hints = {
-            "dir": "留空或 * = 任意目录兜底（单项目推荐）；多项目区分目录才填",
+            "dir": "留空或 * = 任意工作空间兜底（单项目推荐）；多项目区分工作空间才填",
             "code": "必填，小写下划线（如 ess_db）；跨库查询用 db_code.table 引用",
             "url": "地址[:端口]，如 127.0.0.1:3306；Oracle 如 10.0.0.1:1521/orcl",
             "schema": ("PG/GaussDB 填 schema（默认 public）、Oracle/达梦 填 owner"
                        "（默认当前登录用户）；MySQL 留空——库名取 db_code"),
         }
-        labels = {"dir": "工作目录", "name": "项目名称", "code": "数据库名称",
+        labels = {"dir": "工作空间", "name": "项目名称", "code": "数据库名称",
                   "url": "地址", "user": "用户名", "schema": "Schema/Owner"}
         order = ["dir", "name", "code", "type", "url", "user", "schema", "pwd"]
         widgets = {}
@@ -769,7 +875,7 @@ class RecordDialog(tk.Toplevel):
                 add(labels[key], ttk.Entry(frm, textvariable=self.var[key],
                                            width=entry_w(self.var[key].get()),
                                            font=self.F), hints.get(key))
-        ttk.Checkbutton(frm, text="设为该目录默认数据源", variable=self.var_def)\
+        ttk.Checkbutton(frm, text="设为该工作空间默认数据源", variable=self.var_def)\
             .grid(column=1, sticky="w", pady=(8, 0))
         self.chk_confirm = ttk.Checkbutton(frm, text="写操作需人工审核",
                                            variable=self.var_confirm)
@@ -845,10 +951,10 @@ class App(tk.Tk):
     # 列表列。v4.8 起不再展示 Schema/Owner：它只对 PG/GaussDB/Oracle/达梦有意义，
     # MySQL 数据源这一列恒为空，却常年占着一列宽度。字段本身没动，「编辑」弹窗
     # 里照样能改——只是不再占列表的地方。
-    HEADS = ("目录", "项目名称", "数据库名称", "类型", "地址", "用户", "默认", "审核")
+    HEADS = ("工作空间", "项目名称", "数据库名称", "类型", "地址", "用户", "默认", "审核")
     # 列宽 = [最小宽度, 伸缩权重]：宽度先按内容实测（见 _natural_width），窗口多余的
     # 空间再按权重分给权重>0 的列；权重 0 的列（类型/默认/审核）恒为内容宽度，不伸缩
-    COLS = {"目录":       (140, 5),
+    COLS = {"工作空间":   (140, 5),
             "项目名称":   (90,  1),
             "数据库名称": (110, 1),
             "类型":       (70,  0),
@@ -862,21 +968,31 @@ class App(tk.Tk):
     # 曾经给目录列设 620px，结果两条 63 字符的路径被切——"内容自适应"却自带截断，
     # 等于没做。测试必须走 main() 的真实路径（带 DPI awareness），否则测出来的
     # 文本像素宽比真实渲染窄一大截，会漏掉这类问题
-    MAXW = {"目录": 1000, "项目名称": 300, "数据库名称": 300, "类型": 100,
+    MAXW = {"工作空间": 1000, "项目名称": 300, "数据库名称": 300, "类型": 100,
             "地址": 400, "用户": 200, "默认": 60, "审核": 90}
-    # 同目录同色：每项是 (浅色底, 同色系加深字色)。字色跟着背景一起变，
-    # "这一行属于哪个项目"不用盯着底色也能读出来；深字压浅底对比度足够
-    # （tests/test_gui_row_styles.py 用相对亮度钉住这条，换色时别配成浅字）。
-    # 第一个背景就是原来的隔行蓝，单目录退回 zebra 时观感和之前完全一致。
+    # 同项目同色：一个底色 = 一个项目分组。**底色只表示项目这一件事**，字色一律用
+    # TEXT_COLOR，行与行的边界一律交给格栅线——三个通道各管一件事，不兼职。
+    #
+    # 曾经底色兼过两份工，也曾经字色兼过一份，都不成立，记下别再改回去：
+    # · 字色跟目录走（同色系深字）：实测只有 2.28~3.11:1，不达 WCAG AA 的 4.5:1，
+    #   且每行字的颜色都在变，眼睛找不到落点——"说不上来但就是不好读"的最大来源。
+    #   想改回去的先算一笔：7 个色相里只有深蓝/深紫能在白底过 AA，绿/黄/红/青/灰
+    #   全部 3.3~4.3:1，再加深就互相分不开了。分组用面积填充才有效，用字的笔画无效。
+    # · 底色组内隔行深浅（DIR_COLORS_DEEP）：同项目出现两档明度，"同项目同色"的
+    #   信号就被行号稀释了，用户反馈"同项目颜色虽然同色但有深浅"。已删掉，
+    #   行边界改由加深的格栅线承担（_GRID_COLOR，≈2:1）。
     # 颜色数量只是"几个项目后开始循环"，相邻两组异色靠 _dir_colors 的顺序分配保证，
-    # 与用掉几个颜色无关。背景/字色各自都不许重复，否则分组与分色都会失效
-    DIR_COLORS = (("#EBF1F9", "#1F4E79"),   # 浅蓝 / 深蓝
-                  ("#F1EBF9", "#5B3A8E"),   # 浅紫 / 深紫
-                  ("#EAF6EE", "#1E6B3A"),   # 浅绿 / 深绿
-                  ("#FCF1DC", "#8A6100"),   # 浅黄 / 深黄褐
-                  ("#F7EAEA", "#9B2C2C"),   # 浅红 / 深红
-                  ("#E3F0EF", "#155E63"),   # 浅青 / 深青
-                  ("#EFEFEF", "#4A4A4A"))   # 浅灰 / 深灰
+    # 与用掉几个颜色无关。底色不许重复，否则分组失效
+    DIR_COLORS = ("#EBF1F9",   # 浅蓝
+                  "#F1EBF9",   # 浅紫
+                  "#EAF6EE",   # 浅绿
+                  "#FCF1DC",   # 浅黄
+                  "#F7EAEA",   # 浅红
+                  "#E3F0EF",   # 浅青
+                  "#EFEFEF")   # 浅灰
+    # 正文字色：中性深灰蓝。对上面 7 种底色和白底都是 4.7:1 以上（WCAG AA 4.5:1）。
+    # test_gui_row_styles.py 用相对亮度把"每种底色都达标"钉住，换色先跑它
+    TEXT_COLOR = "#1F2937"
     # 内容实测时"文本之外的富余"候选值，从宽到紧。_autofit 取第一个能让总宽塞进可视区的，
     # 所以列宽自适应内容、又不会因为太松而挤出水平滚动条。ttk 单元格内边距实测约 3px，
     # 下限取 6 仍有余量——调小 pad 只会让列紧一点，不会截断文本
@@ -916,11 +1032,15 @@ class App(tk.Tk):
         except Exception:
             pass
         style.configure("Treeview", rowheight=32, font=("Microsoft YaHei UI", 10),
-                        background="#FFFFFF", fieldbackground="#FFFFFF")
+                        background="#FFFFFF", fieldbackground="#FFFFFF",
+                        foreground=self.TEXT_COLOR)
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"),
                         background="#E8EEF7", foreground="#1F3864", relief="flat")
         style.map("Treeview", background=[("selected", "#2F6FDB")],
                   foreground=[("selected", "#FFFFFF")])
+        # 格栅线要在建 Treeview 之前装好：style 名是构造参数的一部分。
+        # 图片必须持有——被 GC 掉元素就成空引用，线会时有时无
+        self._grid_images = _install_grid_style(style, self)
 
         # 列宽管理状态（v4.8 内容自适应）。三份字典分工：
         #   _natural     —— 本次数据算出来的内容宽度，基准值
@@ -935,21 +1055,19 @@ class App(tk.Tk):
         self._w_cache = {}          # 文本像素宽记忆，见 _text_width
         self._f_cell = tkfont.Font(font=("Microsoft YaHei UI", 10))
         self._f_head = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
-        # 默认数据源整行加粗用。与 _f_cell 同字体同字号，只差字重
-        self._f_bold = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
 
         bar = ttk.Frame(self, padding=12)
         bar.pack(fill="x")
         for text, cmd in (("刷新数据源", self.on_refresh), ("复制", self.on_copy),
                           ("添加", self.on_add), ("编辑", self.on_edit),
                           ("删除", self.on_delete), ("测试连接", self.on_test),
-                          ("重置列宽", self.on_reset_cols), ("关闭", self.destroy)):
+                          ("重置列宽", self.on_reset_cols)):
             ttk.Button(bar, text=text, command=cmd, width=12).pack(side="left", padx=3)
 
         frame = ttk.Frame(self, padding=(12, 0, 12, 0))
         frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(frame, columns=self.HEADS, show="headings",
-                                 selectmode="browse")
+                                 selectmode="browse", style=_GRID_STYLE)
         for col in self.HEADS:
             minw, _weight = self.COLS[col]
             self.tree.heading(col, text=col)
@@ -970,8 +1088,8 @@ class App(tk.Tk):
         self.tree.bind("<Configure>", self._on_tree_resize)
         # 手工拖列：松手时拿当前宽度和"代码上次写入的宽度"对比，变了的就是用户拖的
         self.tree.bind("<ButtonRelease-1>", self._on_click_release)
-        # 隔行浅蓝底（zebra）+ 免人工审核整行橙字 + 同目录同色（背景与字色）
-        # + 默认数据源整行加粗。分层口径见 _row_tags，注册与断言共用同一套设计
+        # 同目录同色系 + 组内隔行换明度。分层口径见 _row_tags，
+        # 注册与断言共用同一套设计
         self._configure_row_tags(self.tree)
 
         self.status = ttk.Label(self, text="", padding=12, foreground="#555")
@@ -992,12 +1110,12 @@ class App(tk.Tk):
         return "*" if (d or "").strip() in ("*", "") else d
 
     def _dir_colors(self, dir_keys):
-        """给每个不同目录分配一个浅色底；相邻目录颜色必不相同。
+        """给每个不同目录分配一个色系；相邻目录色系必不相同。
 
         按出现顺序依次取下一个颜色（循环）。列表按 dir_path 排过序，所以相邻两组
         一定异色——分组边界一眼能看出来。同一个目录永远拿同一个颜色，刷新、滚动、
-        增删行之后都不会跳色（这点比"按行号取色"重要：按行号的话删一行后半段的颜色
-        全变，刚才记住的分组就乱了）。
+        增删行之后都不会跳色（这点比"按行号取色"重要：按行号的话删一行后半段的色系
+        全变，刚才记住的分组就乱了）。色系内明度档另按组内序号走，见 _row_tags。
         """
         out = {}
         prev = -1
@@ -1007,50 +1125,82 @@ class App(tk.Tk):
             prev = i
         return out
 
+    @staticmethod
+    def _shorten_dir(v):
+        """目录值的中段省略：段数多时只留首尾各两段，中间换成 …。
+
+        真实配置里 D 盘 16 条路径有 23 字符的共同前缀
+        （D:\\workspace\\projects\\）——每行开头一多半都一样，
+        差异全挤在末尾，眼睛扫不出区别。留首两段（盘符+工作区根，认得出是哪棵树）
+        和末两段（认得出是哪个项目），中间的 projects 之流正是最没信息量的
+        那段：D:\\workspace\\…\\platform\\sample_service。
+
+        段数 ≤4 不动：首两段+末两段正好等于全部，插个 … 只会让字符串变更长，
+        一段都省不下来。没有分隔符的值（ORACLE工作空间、任意目录兜底）只有一段，
+        也不动。只改显示，_rows 里始终是完整路径。
+
+        单值版不知道同列还有哪些值，可能把两条目录省略成同一串——整列调用走
+        _shorten_dirs，那里有碰撞保护。
+        """
+        s = str(v)
+        sep = "/" if ("/" in s and "\\" not in s) else "\\"
+        segs = s.replace("\\", "/").split("/")
+        if len(segs) <= 4:
+            return v
+        return sep.join(segs[:2]) + sep + "…" + sep + sep.join(segs[-2:])
+
+    def _shorten_dirs(self, dirs):
+        """整列做中段省略；省略后两条不同目录若显示相同，冲突项退回完整路径。
+
+        省略靠丢中间段，D:\\ws\\dept\\scm 与 D:\\ws\\projects\\scm 会丢成
+        同一串 D:\\ws\\…\\scm——分组和辨识一起出错。所以按显示值归组，一组里
+        对应多个真实目录的就整体退回完整路径（同进同退，避免同列两种口径）。
+        """
+        shown = [self._shorten_dir(d) for d in dirs]
+        by_shown = {}
+        for d, s in zip(dirs, shown):
+            by_shown.setdefault(s, set()).add(d)
+        return [s if len(by_shown[s]) == 1 else d for d, s in zip(dirs, shown)]
+
     def _configure_row_tags(self, tree):
         """注册行样式 tag。分层口径见 _row_tags。
 
         每个 tag 只设置一个维度的选项，同一行绝不会出现两个 tag 抢同一个选项——
         渲染结果因此不依赖 ttk 的 tag 优先级规则（那条规则跨版本/主题并不稳定，
-        靠"后设置的赢"去叠颜色等于把显示交给运气）。
+        靠"后设置的赢"去叠颜色等于把显示交给运气）。现在只有背景一个维度，
+        一个色 = 一个项目。
         """
-        tree.tag_configure("zebra", background=self.DIR_COLORS[0][0])
-        # 背景与字色拆成两个 tag：单目录时隔行只换底、字色仍跟目录
-        for _i, (_bg, _fg) in enumerate(self.DIR_COLORS):
+        for _i, _bg in enumerate(self.DIR_COLORS):
             tree.tag_configure(f"dir{_i}", background=_bg)
-            tree.tag_configure(f"fgdir{_i}", foreground=_fg)
-        # 默认数据源只设字重，不碰字色——字色归目录那一层
-        tree.tag_configure("default_row", font=self._f_bold)
 
     @staticmethod
-    def _row_tags(color_idx, is_default, banded, row_index):
-        """一行的 tag 列表：背景 / 字色 / 字重三层各选一个，互不重叠。
+    def _row_tags(color_idx):
+        """一行的 tag：按目录取一个底色，就这一件事。
 
-        背景：多目录时按目录取色；只有一个目录时没有区分意义，退回隔行浅蓝
-        字色：一律跟目录——同一项目就同色，审核状态只看「审核」列的文字
-        字重：默认数据源加粗
+        底色只表示"哪个项目"——组内不再隔行深浅（那会让"同项目同色"的信号被行号
+        稀释，见 DIR_COLORS 注释），行与行的边界由格栅线 _GRID_COLOR 承担。
         """
-        tags = []
-        if banded:
-            tags.append(f"dir{color_idx}")
-        elif row_index % 2 == 0:
-            tags.append("zebra")
-        tags.append(f"fgdir{color_idx}")
-        if is_default == 1:
-            tags.append("default_row")
-        return tags
+        return [f"dir{color_idx}"]
 
-    def _text_width(self, text, bold=False):
+    def _text_width(self, text, font=None):
         """文本像素宽（列宽实测用）。测量失败时按字符数粗估，不至于让布局崩掉。
+
+        font 由调用方按「这段文本实际用什么字体渲染」传入（缺省 _f_cell）。
+        这条参数是踩过坑留下的：默认数据源曾经整行加粗（_f_bold），而实测对所有
+        行都用常规字体量——粗体宽约 5%，63 字符的路径少算近 30px，列宽给到 567px
+        而粗体渲染要 573px，最后一个字被切，「重置列宽」每次重算都少算同一笔。
+        现在没有加粗行了，但**哪一类行若改用别的字体，这里必须跟着传对应字体**，
+        否则列宽会按错字体重算。缓存 key 用字体名而非 Font 对象：tkinter 的
+        Font 定义了 __eq__ 却没配 __hash__，直接当 key 会抛 unhashable。
 
         带记忆：类型/用户/审核这几列的取值高度重复，几百行配置实测时能省掉大量
         重复的 measure() Tcl 往返。路径列取值基本不重复，命中不了缓存，也无妨。
         """
-        key = (text, bold)
+        f = font if font is not None else self._f_cell
+        key = (text, str(f))
         hit = self._w_cache.get(key)
         if hit is not None:
             return hit
-        f = self._f_head if bold else self._f_cell
         try:
             w = f.measure(text)
         except Exception:
@@ -1062,10 +1212,13 @@ class App(tk.Tk):
         """一列的内容宽度 = max(表头宽, 各行取值宽) + pad，夹在 [最小, 上限] 之间。
 
         pad 是"文本之外的富余"，由 _autofit 按能否塞进可视区挑选（见 PAD_CHOICES）。
-        真正决定放不放得下内容的是 ttk 那约 3px 的单元格内边距，pad 只要 ≥3 就不会截断，
-        所以这里怎么调都安全——调小只是列变紧一点。
+        真正决定放不放得下内容的是 ttk 那约 2px 的单元格左内边距，pad 只要 ≥2 就
+        不会截断，所以这里怎么调都安全——调小只是列紧一点。
+
+        每一行按**它实际渲染的字体**量（见 _text_width 的踩坑记录）。现在所有行
+        统一 _f_cell；表头是粗体，单独用 _f_head 量。
         """
-        w = self._text_width(col, bold=True) + pad + 8   # 表头文字 + 排序箭头
+        w = self._text_width(col, self._f_head) + pad + 8   # 表头文字 + 排序箭头
         for row in self._display:
             w = max(w, self._text_width(row[idx]) + pad)
         minw, _weight = self.COLS[col]
@@ -1266,15 +1419,17 @@ class App(tk.Tk):
             return
         self._rows = rows
         display = []
-        # 同目录同色：一个浅色底 = 一个项目分组。只有一个目录时（比如全是 * 兜底）
-        # 着色没有区分意义，退回隔行浅蓝，长列表仍读得舒服
+        # 同项目同色：一个底色 = 一个项目分组（底色只表示项目，见 DIR_COLORS 注释）
         color_of = self._dir_colors([self._dir_key(r[0]) for r in rows])
-        banded = len(color_of) > 1
+        # 目录列先按当前数据做中段省略，再进 values——省略的是显示文本，
+        # self._rows 里始终是完整路径，编辑/复制/删除/测试都读它（见 _sel）
+        shown_dirs = self._shorten_dirs(
+            [d if d not in ("*", "") else "*（任意工作空间兜底）" for d in (r[0] for r in rows)])
         for i, (d, name, code, t, url, user, schema, isdef, wconf) in enumerate(self._rows):
-            tags = self._row_tags(color_of[self._dir_key(d)], isdef, banded, i)
+            tags = self._row_tags(color_of[self._dir_key(d)])
             # v4.8：db_schema 不再进 values——列表不展示 Schema/Owner 列。
             # self._rows 里仍保留该字段，编辑/测试/删除都按 9 元组解包，不受影响
-            vals = (d if d not in ("*", "") else "*（任意目录兜底）",
+            vals = (shown_dirs[i],
                     name, code, t, url, user,
                     "✓" if isdef == 1 else "",
                     "✓" if wconf == 1 else "✗ 免")
@@ -1285,7 +1440,7 @@ class App(tk.Tk):
         self._autofit()
         self.status.configure(
             foreground="#555",
-            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ 同色系=同一目录（项目）｜ "
+            text=f"共 {len(self._rows)} 条 ｜ {fp_text} ｜ 双击行编辑 ｜ 同色系=同一工作空间（项目）｜ "
                  f"保存后 MCP 下一次查询自动生效（秒级），无需调 refresh_datasources ｜ "
                  f"MCP 版本 v{cfg.MCP_SERVER_INFO['version']}")
         if self._first:
@@ -1365,15 +1520,15 @@ class App(tk.Tk):
         return self._rows[int(sel[0])]
 
     def on_copy(self):
-        """复制选中数据源：除「工作目录」外全部沿用，目录名后加 _copy。
+        """复制选中数据源：除「工作空间」外全部沿用，工作空间名后加 _copy。
 
         v4.8：主键是 (dir_path, db_code)，两边都照抄必然撞唯一约束，所以副本必须换个
-        身份。按既定做法 _copy 加在工作目录上（C:\\proj → C:\\proj_copy），数据库名称
-        不动——副本的用途是"给另一个目录用的同一套连接参数"，改完地址就能指向另一个库。
+        身份。按既定做法 _copy 加在工作空间上（C:\\proj → C:\\proj_copy），数据库名称
+        不动——副本的用途是"给另一个工作空间用的同一套连接参数"，改完地址就能指向另一个库。
 
-        例外：源行的目录是兜底值 '*' 或空串时，'*_copy' 是一个永远匹配不到任何工作区的
-        死路径（dir_path 是精确匹配当前工作目录的，见 datasources._load_datasources_*）。
-        此时退回给数据库名称加 _copy、目录保持兜底值，并强制取消默认标记——同一目录下
+        例外：源行的工作空间是兜底值 '*' 或空串时，'*_copy' 是一个永远匹配不到任何工作区的
+        死路径（dir_path 是精确匹配当前工作空间的，见 datasources._load_datasources_*）。
+        此时退回给数据库名称加 _copy、工作空间保持兜底值，并强制取消默认标记——同一工作空间下
         两个 is_default=1 会让"哪个是默认"变没准。弹框说明原因，不做静默降级。
         """
         row = self._sel()
@@ -1492,7 +1647,9 @@ def main():
             windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description="数据源管理 GUI（v4.9 双后端）")
+    if not claim_or_restore():
+        return
+    ap = argparse.ArgumentParser(description="数据源管理 GUI（v5.0 双后端）")
     ap.add_argument("--backend", choices=("sqlite", "mysql"), default=None,
                     help="强制指定编辑的后端（默认跟随 .env 的 MCP_CONFIG_MODE）")
     args = ap.parse_args()

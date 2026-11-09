@@ -190,9 +190,10 @@ def dump_database(*, db_code: str, file_path: Path,
 
     logger.info(f"[dump] 开始导出 {db_code} → {file_path}")
     logger.debug(f"[dump] argv: {base_argv}")  # 密码已移至 MYSQL_PWD 环境变量，argv 不含敏感信息
-
+    tmp_path = file_path.with_name(file_path.name + ".part")
+    seed_note = None
     try:
-        with open(file_path, "wb") as fh:
+        with open(tmp_path, "wb") as fh:
             proc = subprocess.run(base_argv, stdout=fh, stderr=subprocess.PIPE,
                                   text=False, timeout=600, env=dump_env)
         if proc.returncode != 0:
@@ -200,39 +201,45 @@ def dump_database(*, db_code: str, file_path: Path,
             # 保险起见：万一 stderr 里泄露了密码片段，做一次最小化脱敏
             err_msg = err_msg.replace(ds["db_password"], "***") if ds.get("db_password") else err_msg
             raise DumpError(f"mysqldump 退出码 {proc.returncode}\nstderr:\n{err_msg}")
+        # ---- 3. 种子表数据段 --------------------------------------------
+        # 仅 include_data=False 时需要：True 时第一段已含全部数据，
+        # 再补一遍会产生重复 INSERT。所有段都写临时文件，全部成功后才发布。
+        if seed_only_tables and include_data:
+            seed_note = (f"include_data=True 时全库数据已包含种子表 {list(seed_only_tables)}，"
+                         f"未重复追加；如只想让种子表带数据，请设 include_data=False")
+        elif seed_only_tables:
+            seed_argv = _build_mysqldump_argv(
+                ds=ds, include_data=True,
+                exclude_patterns=None, routines=False,
+                charset=charset, cli_path=cli_path,
+                tables=list(seed_only_tables), no_create_info=True,
+            )
+
+            logger.info(f"[dump] 追加种子表数据: {seed_only_tables}")
+            with open(tmp_path, "ab") as fh:  # append binary
+                fh.write(b"\n\n-- ============================================================\n")
+                fh.write(b"-- SECTION: Seed Data (standard code tables)\n")
+                fh.write(b"-- ============================================================\n\n")
+                proc2 = subprocess.run(seed_argv, stdout=fh, stderr=subprocess.PIPE,
+                                       text=False, timeout=300, env=dump_env)
+            if proc2.returncode != 0:
+                err2 = proc2.stderr.decode("utf-8", errors="replace")
+                if ds.get("db_password"):
+                    err2 = err2.replace(ds["db_password"], "***")
+                raise DumpError(f"种子表 mysqldump 失败，退出码 {proc2.returncode}\nstderr:\n{err2}")
+
+        os.replace(tmp_path, file_path)
     except FileNotFoundError as e:
-        raise CliMissingError(f"找不到 mysqldump: {e}")
-    except subprocess.TimeoutExpired:
-        raise DumpError("mysqldump 超过 600 秒仍未结束，已强制终止")
-
-    # ---- 3. 种子表数据段 ------------------------------------------------
-    # 仅 include_data=False 时需要：True 时第一段已含全部数据，
-    # 再补一遍会产生重复 INSERT。此时 seed_only_tables 属冗余参数，
-    # 在返回摘要里说明，避免调用方误以为做了额外的事。
-    seed_note = None
-    if seed_only_tables and include_data:
-        seed_note = (f"include_data=True 时全库数据已包含种子表 {list(seed_only_tables)}，"
-                     f"未重复追加；如只想让种子表带数据，请设 include_data=False")
-    elif seed_only_tables:
-        seed_argv = _build_mysqldump_argv(
-            ds=ds, include_data=True,
-            exclude_patterns=None, routines=False,
-            charset=charset, cli_path=cli_path,
-            tables=list(seed_only_tables), no_create_info=True,
-        )
-
-        logger.info(f"[dump] 追加种子表数据: {seed_only_tables}")
-        with open(file_path, "ab") as fh:  # append binary
-            fh.write(b"\n\n-- ============================================================\n")
-            fh.write(b"-- SECTION: Seed Data (standard code tables)\n")
-            fh.write(b"-- ============================================================\n\n")
-            proc2 = subprocess.run(seed_argv, stdout=fh, stderr=subprocess.PIPE,
-                                   text=False, timeout=300, env=dump_env)
-        if proc2.returncode != 0:
-            err2 = proc2.stderr.decode("utf-8", errors="replace")
-            if ds.get("db_password"):
-                err2 = err2.replace(ds["db_password"], "***")
-            raise DumpError(f"种子表 mysqldump 失败，退出码 {proc2.returncode}\nstderr:\n{err2}")
+        raise CliMissingError(f"找不到 mysqldump: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise DumpError("mysqldump 超过执行时限仍未结束，已强制终止") from e
+    finally:
+        # 失败或中断只清临时文件；已有的正式备份始终保持不变。
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
     # ---- 4. 统计 & 返回 ---------------------------------------------------
     elapsed = round(time.time() - t0, 2)

@@ -158,5 +158,5 @@ READONLY_DB_GUARD = os.environ.get("MCP_READONLY_DB_GUARD", "on").strip().lower(
 # 与 README 标题 / GUI / 启动脚本保持同一个号，别只改一处。
 MCP_SERVER_INFO = {
     "name": "db-auto-router",
-    "version": "4.9"
+    "version": "5.0.0"
 }

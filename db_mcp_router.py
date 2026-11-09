@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MCP Router v4.7 - 生产级多数据源查询路由服务（薄启动入口）
+MCP Router v5.0 - 生产级多数据源查询路由服务（薄启动入口）
 支持 MySQL/达梦/PostgreSQL/Oracle/GaussDB(高斯)
 
 v4.0 起本体拆分为包 `db_auto_router/`（config/logcfg/errors/util/audit/sqlguard/

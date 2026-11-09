@@ -200,10 +200,6 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     # 结果自动摘要：超过阈值时只返回部分数据 + 统计信息
     # （dialect 已在连接前算好，第三层要用）
 
-    # 统一出口："参数被夹"与"结果被截断"两类提示合并进同一个 warning 键
-    # （调用方只认这一个键，不新增字段），两类同时出现时都可见。
-    warning = "\n".join(w for w in (clamp_warning, limit_warning) if w)
-
     # 自动 LIMIT 的提示：只在结果真的触达上限时才给。
     # 聚合查询（SELECT COUNT(*) 只回 1 行）和任何小结果集都被注入了 LIMIT，但毫无影响——
     # 一律提示等于每次查询都挂一条噪音，调用方（模型/脚本）很快就会学会忽略警告，
@@ -211,6 +207,10 @@ def execute_read_only_query(sql: str, ds: Dict[str, str], default_db: str,
     if auto_limit is not None and not limit_warning and len(result_data) >= auto_limit:
         limit_warning = (f"⚠️ 未指定行数限制，已自动限制返回 {auto_limit} 行，"
                          f"结果可能不完整（如需更多数据请显式指定 LIMIT 或传 max_rows 参数）")
+
+    # 统一出口："参数被夹"与"结果被截断"两类提示合并进同一个 warning 键。
+    # 必须在自动 LIMIT 提示生成之后合成，否则该提示只写进局部变量、不会进入返回值。
+    warning = "\n".join(w for w in (clamp_warning, limit_warning) if w)
 
     if len(result_data) > SUMMARY_THRESHOLD:
         display_rows = result_data[:SUMMARY_DISPLAY_ROWS]

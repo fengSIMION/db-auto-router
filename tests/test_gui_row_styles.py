@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-"""数据源管理 GUI 的行样式分层：背景 / 字色 / 字重
+"""数据源管理 GUI 的行样式：同项目同色（底色只表示项目）
 
-背景：原来只有背景按目录分色（同目录同色），字色只有两种特例——默认数据源整行
-绿字、免人工审核整行橙字。现在字色一律按目录走，默认数据源改为加粗；
-免审核行也不再单独给橙色——同一项目就同色，审核状态只看「审核」列的文字。
+列表按 dir_path 排序，同项目的数据源本就挨在一起，一个底色就是一个项目分组。
 
-**核心设计约束（本文件最主要的那条断言）：同一行的多个 tag 绝不设置同一个选项。**
-ttk 的 tag 优先级（tag_configure 的先后顺序、item tag 列表里的位置）跨版本/主题
-并不稳定，靠"后设置的赢"去叠颜色，等于把渲染结果交给运气。所以分三层，每层只
-设置一个维度：
-    背景   dir{i}（按目录分色）｜ zebra（只有一个目录时隔行，退回老观感）
-    字色   fgdir{i}（按目录分色，所有行一律跟随）
-    字重   default_row（加粗）
-三层互不重叠，任意组合的渲染结果都是确定的，与优先级规则无关。
+**三个视觉通道各管一件事，这是本文件守护的设计：**
+    底色（DIR_COLORS 第 i 个）= 哪个项目
+    格栅线（_GRID_COLOR）     = 行与行的边界
+    字色（TEXT_COLOR）        = 统一深色，不携带任何分组信息
+
+曾经底色兼过两份工、字色也兼过一份，都不成立，别再改回去：
+  · 字色跟目录走：2.28~3.11:1，不达 WCAG AA 的 4.5:1，且每行字色都在变，
+    眼睛找不到落点。要改回去的先算：7 个色相只有深蓝/深紫能在白底过 AA。
+  · 底色组内隔行深浅（DIR_COLORS_DEEP）："同项目同色"的信号被行号稀释，
+    用户反馈"同项目颜色虽然同色但有深浅"。行边界已交还给加深的格栅线。
+
+本文件最主要的一条断言：TEXT_COLOR 对每一种底色、对白底，对比度都达 4.5:1。
 """
 
 __author__ = "fengkeju"
@@ -28,12 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import manage_datasources_gui as GUI  # noqa: E402
 
-# 设计契约：每个 tag 只设置一个维度的选项。测试用同一份口径去校验注册结果，
-# 注册代码若给某个 tag 多加了一个选项，这里立刻红。
-LAYER_OPTIONS = {
-    "zebra": {"background"},
-    "default_row": {"font"},
-}
+# 设计契约：每个 tag 只设置背景一个维度。
+LAYER_OPTIONS = {}
 
 
 def _options_of(tag):
@@ -41,128 +39,113 @@ def _options_of(tag):
         return LAYER_OPTIONS[tag]
     if re.fullmatch(r"dir\d+", tag):
         return {"background"}
-    if re.fullmatch(r"fgdir\d+", tag):
-        return {"foreground"}
     raise AssertionError(f"未登记的 tag: {tag!r}")
 
 
+def _lum(hexs):
+    r, g, b = (int(hexs[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b):
+    la, lb = _lum(a), _lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
 # ---------------------------------------------------------------------------
-# 调色板：必须是 (背景, 字色) 对
+# 调色板：一串项目底色，互不重复
 # ---------------------------------------------------------------------------
 
-def test_dir_colors_are_background_foreground_pairs():
+def test_dir_colors_are_plain_hex_backgrounds():
     colors = GUI.App.DIR_COLORS
     assert colors, "DIR_COLORS 不能为空"
-    for entry in colors:
-        assert isinstance(entry, tuple) and len(entry) == 2, \
-            f"每一项必须是 (背景, 字色) 二元组，得到 {entry!r}"
-        for c in entry:
-            assert re.fullmatch(r"#[0-9A-Fa-f]{6}", c), f"不是 #RRGGBB: {c!r}"
+    for c in colors:
+        assert isinstance(c, str), f"每一项就是一个背景色串，得到 {c!r}"
+        assert re.fullmatch(r"#[0-9A-Fa-f]{6}", c), f"不是 #RRGGBB: {c!r}"
 
 
-def test_dir_colors_backgrounds_and_foregrounds_are_each_distinct():
-    """背景撞色会让两个项目看起来是一组；字色撞色则让"字色跟着目录走"失去意义。"""
-    colors = GUI.App.DIR_COLORS
-    bgs = [c[0].lower() for c in colors]
-    fgs = [c[1].lower() for c in colors]
-    assert len(set(bgs)) == len(bgs), f"背景色重复: {bgs}"
-    assert len(set(fgs)) == len(fgs), f"字色重复: {fgs}"
+def test_dir_colors_are_distinct():
+    """底色撞色会让两个项目看起来是一组。"""
+    lowered = [c.lower() for c in GUI.App.DIR_COLORS]
+    assert len(set(lowered)) == len(lowered), f"背景色重复: {lowered}"
 
 
-def test_dir_foregrounds_are_dark_enough_to_read_on_their_background():
-    """字色压在浅底上必须读得清：用相对亮度粗判，字色不得比底色还亮。"""
-    def lum(hexs):
-        r, g, b = (int(hexs[i:i + 2], 16) / 255 for i in (1, 3, 5))
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b
-    for bg, fg in GUI.App.DIR_COLORS:
-        assert lum(fg) < lum(bg), f"字色 {fg} 不够深，压在 {bg} 上读不清"
+def test_no_deep_shade_list_anymore():
+    """组内深浅已删掉：底色只表示项目，行边界归格栅线。
+
+    谁把 DIR_COLORS_DEEP 加回来，这条立刻红——那会让"同项目同色"的信号被行号
+    稀释（用户明确反馈过"同项目颜色虽然同色但有深浅"）。
+    """
+    assert not hasattr(GUI.App, "DIR_COLORS_DEEP"), (
+        "DIR_COLORS_DEEP 又回来了：底色开始兼职行号，项目分组信号会被稀释")
 
 
 # ---------------------------------------------------------------------------
-# 核心不变式：一行的 tag 之间，选项互不重叠
+# 正文字色：对每种底色、对白底都要达 WCAG AA
 # ---------------------------------------------------------------------------
 
-def test_row_tags_never_set_the_same_option_twice():
-    """任意 (目录/默认/隔行) 组合，都不许出现两个 tag 抢同一个选项。"""
+def test_text_color_is_readable_on_every_background_and_white():
+    """4.5:1 是硬线——分组要看得见，字更不能看不清。"""
+    for bg in list(GUI.App.DIR_COLORS) + ["#FFFFFF"]:
+        ratio = _contrast(GUI.App.TEXT_COLOR, bg)
+        assert ratio >= 4.5, (
+            f"正文 {GUI.App.TEXT_COLOR} 压在 {bg} 上只有 {ratio:.2f}:1，"
+            f"低于 WCAG AA 的 4.5:1")
+
+
+def test_text_color_is_dark_in_absolute_terms():
+    """别改成浅色字：相对亮度单独兜一道，防止底色集合变化时漏判。"""
+    assert _lum(GUI.App.TEXT_COLOR) < 0.25, (
+        f"TEXT_COLOR {GUI.App.TEXT_COLOR} 太亮，压在浅底上读不清")
+
+
+# ---------------------------------------------------------------------------
+# 格栅线：行边界靠它，必须真的看得见
+# ---------------------------------------------------------------------------
+
+def test_grid_line_is_visible_against_every_background():
+    """线是行边界的唯一载体，对比度必须够——这是 #BCC9DC（1.19:1）换掉的教训。
+
+    用对比度而不用亮度差：亮度差 0.1 在浅底上几乎看不出来，却能让一个
+    "看起来有测试"的门槛通过。
+    """
+    for bg in list(GUI.App.DIR_COLORS) + ["#FFFFFF"]:
+        ratio = _contrast(GUI._GRID_COLOR, bg)
+        assert ratio >= 1.8, (
+            f"格栅线 {GUI._GRID_COLOR} 压在 {bg} 上只有 {ratio:.2f}:1，"
+            f"行边界会看不见（用户反馈过'行与行之间没有明显的分界'）")
+
+
+def test_grid_line_is_lighter_than_the_text():
+    """线不能抢字：可见度要够，但不能压过正文。"""
+    for bg in list(GUI.App.DIR_COLORS):
+        assert _contrast(GUI._GRID_COLOR, bg) < _contrast(GUI.App.TEXT_COLOR, bg), (
+            f"格栅线在 {bg} 上比正文还显眼，抢字了")
+
+
+# ---------------------------------------------------------------------------
+# tag 选择：一个目录一个底色
+# ---------------------------------------------------------------------------
+
+def test_row_tags_picks_one_background_per_directory():
+    for i in range(len(GUI.App.DIR_COLORS)):
+        assert GUI.App._row_tags(i) == [f"dir{i}"]
+
+
+def test_row_tags_never_set_more_than_background():
+    """字色/字重/第二层背景谁加回来，这条立刻红。"""
     n = len(GUI.App.DIR_COLORS)
     checked = 0
-    for banded in (True, False):
-        for is_default in (0, 1):
-            for color_idx in range(n):
-                for row_index in (0, 1, 5):
-                    tags = GUI.App._row_tags(color_idx, is_default, banded, row_index)
-                    assert tags, f"空 tag 列表: {color_idx},{is_default}"
-                    seen = {}
-                    for t in tags:
-                        for opt in _options_of(t):
-                            assert opt not in seen, (
-                                f"选项 {opt} 同时被 {seen[opt]!r} 和 {t!r} 设置"
-                                f"（banded={banded} is_default={is_default} "
-                                f"color_idx={color_idx}）")
-                            seen[opt] = t
-                    checked += 1
-    assert checked >= 50, f"组合数太少（{checked}），断言可能没跑开"
-
-
-# ---------------------------------------------------------------------------
-# 各状态的 tag 选择
-# ---------------------------------------------------------------------------
-
-def test_row_tags_banded_uses_dir_background_and_foreground():
-    tags = GUI.App._row_tags(2, 0, True, 7)
-    assert tags == ["dir2", "fgdir2"]
-
-
-def test_row_tags_single_directory_falls_back_to_zebra():
-    """只有一个目录时背景没有区分意义，退回隔行浅蓝（老观感）。"""
-    assert GUI.App._row_tags(0, 0, False, 0) == ["zebra", "fgdir0"]
-    assert GUI.App._row_tags(0, 0, False, 1) == ["fgdir0"]
-
-
-def test_row_tags_default_gets_bold_layer_only():
-    """默认数据源：加粗，且不碰字色（字色归目录那一层）。"""
-    tags = GUI.App._row_tags(1, 1, True, 0)
-    assert tags == ["dir1", "fgdir1", "default_row"]
-    assert _options_of("default_row") == {"font"}
-
-
-def test_row_tags_no_confirm_row_uses_the_same_project_color():
-    """免审核行不再有特殊字色：与同项目其它行完全同色。
-
-    审核状态从此只看「审核」列的文字（✓ / ✗ 免），不再靠整行橙色表达——
-    用户明确要求"同一项目同色"。
-    """
-    assert GUI.App._row_tags(3, 0, True, 0) == ["dir3", "fgdir3"]
-    assert GUI.App._row_tags(3, 0, True, 1) == ["dir3", "fgdir3"]
-
-
-def test_row_tags_default_row_bold_layer_stacks_on_project_color():
-    tags = GUI.App._row_tags(3, 1, True, 0)
-    assert tags == ["dir3", "fgdir3", "default_row"]
+    for color_idx in range(n):
+        for t in GUI.App._row_tags(color_idx):
+            assert _options_of(t) == {"background"}, f"tag {t!r} 设置了背景之外的选项"
+            checked += 1
+    assert checked >= 5, f"组合数太少（{checked}），断言可能没跑开"
 
 
 # ---------------------------------------------------------------------------
 # 真实注册结果与设计契约一致（需要 Tk；没有显示环境时跳过）
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def tk_root():
-    """整个文件共用一个 Tk root。
-
-    不用函数级：同一进程里建第二个 Tk() 在 Windows 上偶发失败（实测 5 次里
-    2 次建不起来），会让注册级断言随机跳过——而它正是本文件最关键的两条。
-    """
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-    except Exception as e:                      # pragma: no cover - 依赖显示环境
-        pytest.skip(f"Tk 不可用，跳过注册级断言: {type(e).__name__}: {e}")
-    root.withdraw()
-    try:
-        yield root
-    finally:
-        root.destroy()
-
 
 @pytest.fixture
 def tree(tk_root):
@@ -175,19 +158,16 @@ def tree(tk_root):
 
 
 class _TagHost:
-    """只提供 _configure_row_tags 用到的两个属性。
+    """只提供 _configure_row_tags 用到的一个属性。
 
     不构造真正的 App：那需要配置库、屏幕几何和一次后台 reload，
     而这里要验的只是 tag 注册那一小段接线。
     """
     DIR_COLORS = GUI.App.DIR_COLORS
 
-    def __init__(self, bold_font):
-        self._f_bold = bold_font
+    def __init__(self):
         # 必须用 MethodType 绑：未绑定函数存成实例属性不会触发描述符协议，
         # 调用时会少传一个 self。
-        # 绑在实例上而不是类体里：被测方法不存在时，类体引用会让整个文件
-        # 收集期报错，其它用例就连"单独失败"的机会都没有了。
         self._configure_row_tags = MethodType(GUI.App._configure_row_tags, self)
 
 
@@ -203,39 +183,24 @@ def _explicit_options(tree, tag, baseline):
 
 
 def test_registered_tags_match_the_layer_design(tree):
-    from tkinter import font as tkfont
-    host = _TagHost(tkfont.Font(font=("Microsoft YaHei UI", 10, "bold")))
+    host = _TagHost()
     host._configure_row_tags(tree)
 
     n = len(GUI.App.DIR_COLORS)
-    expected = {"zebra", "default_row"}
-    expected |= {f"dir{i}" for i in range(n)}
-    expected |= {f"fgdir{i}" for i in range(n)}
+    expected = {f"dir{i}" for i in range(n)}
     baseline = tree.tag_configure("__never_registered__")   # 全空串 = 默认记录
     registered = {t for t in expected if _explicit_options(tree, t, baseline)}
     assert registered == expected, f"有 tag 没注册上: {expected - registered}"
 
-    # 每个 tag 只设置自己那一层的一个选项——这是"渲染不依赖 tag 优先级"的根据。
-    # 谁要是给 default_row 添个 foreground，这条立刻红
+    # 每个 tag 只设置背景这一个选项——字色/字重/第二层背景谁加回来，这条立刻红
     for tag in sorted(expected):
         assert _explicit_options(tree, tag, baseline) == _options_of(tag), \
             f"tag {tag!r} 设置的不是设计契约里那一个选项"
 
 
 def test_registered_tag_values(tree):
-    """选项对还不够，值也得对：配错色、字重没加上，分层正确也白搭。"""
-    from tkinter import font as tkfont
-    bold = tkfont.Font(font=("Microsoft YaHei UI", 10, "bold"))
-    host = _TagHost(bold)
+    """选项对还不够，值也得对：配错色，分层正确也白搭。"""
+    host = _TagHost()
     host._configure_row_tags(tree)
-
-    colors = GUI.App.DIR_COLORS
-    for i, (bg, fg) in enumerate(colors):
+    for i, bg in enumerate(GUI.App.DIR_COLORS):
         assert tree.tag_configure(f"dir{i}")["background"] == bg
-        assert tree.tag_configure(f"fgdir{i}")["foreground"] == fg
-    # zebra 沿用第一个目录色的底：单目录时观感和改动前一致
-    assert tree.tag_configure("zebra")["background"] == colors[0][0]
-    # 默认行加粗：既验 tag 引用的就是这个字体对象，也验该字体真的是 bold
-    # （不靠"我传了个叫 bold 的 Font 进去"自证）
-    assert tree.tag_configure("default_row")["font"] == str(bold)
-    assert bold.actual()["weight"] == "bold"

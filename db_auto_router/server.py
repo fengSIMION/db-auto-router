@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MCP 服务器入口（mcp SDK 2.x）：创建实例 + 注册 17 个工具 + stdio 启动
+"""MCP 服务器入口（mcp SDK 2.x）：创建实例 + 注册 18 个工具 + stdio 启动
 ——原 2218–2233、2900–2978 行"""
 
 __author__ = "fengkeju"
@@ -29,7 +29,7 @@ from .tools import (query, execute, list_datasources, refresh_datasources, searc
 # SDK 2.x 起 FastMCP 改名 MCPServer 并搬到 mcp.server.mcpserver，协议类型拆到
 # 独立的 mcp_types 包；构造函数原生收 version（1.x 时代只能篡改私有属性）。
 mcp = MCPServer(MCP_SERVER_INFO["name"],
-                instructions="多数据源 SQL 查询路由：按工作目录自动选择数据源，支持跨库语法。query 只读；execute 写操作执行前会向用户弹确认。",
+                instructions="db-auto-router：多数据源 SQL 查询路由。按工作空间自动选择数据源，覆盖 MySQL / 达梦 / PostgreSQL / GaussDB / Oracle 五种方言，支持跨库查询语法；query 通道只读，execute 等写操作执行前需用户确认，全部操作留审计。",
                 version=MCP_SERVER_INFO["version"])
 
 
@@ -48,9 +48,9 @@ def _register_tools():
         "rollback_transaction": ToolAnnotations(title="回滚事务", readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True),
         "list_transactions": ToolAnnotations(title="列出活跃事务", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
         "extend_transaction": ToolAnnotations(title="续期事务", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True),
-        "export_csv": ToolAnnotations(title="导出CSV", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+        "export_csv": ToolAnnotations(title="导出CSV", readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False),
         "import_csv": ToolAnnotations(title="导入CSV(需确认)", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False),
-        "dump_database": ToolAnnotations(title="导出整库SQL(需确认)", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+        "dump_database": ToolAnnotations(title="导出整库SQL(需确认)", readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False),
         "query_audit_log": ToolAnnotations(title="查询审计日志", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False),
         "explain_query": ToolAnnotations(title="执行计划与诊断", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
         "slow_queries": ToolAnnotations(title="慢查询与在跑语句", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),

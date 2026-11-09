@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import db_auto_router.config as config
+import db_auto_router.readengine as readengine
 
 _CAP_ENV_KEYS = ("MCP_QUERY_MAX_ROWS_CAP", "MCP_QUERY_TIMEOUT_MAX")
 
@@ -124,3 +125,41 @@ def test_timeout_cap_below_default_is_raised_to_default(reload_config):
     importlib.reload(config)
     assert config.READ_TIMEOUT == 30
     assert config.QUERY_TIMEOUT_MAX == 30
+
+
+# ---------------------------------------------------------------------------
+# 自动 LIMIT 的提示必须真正进入返回值
+# ---------------------------------------------------------------------------
+
+def test_auto_limit_at_cap_returns_warning(monkeypatch):
+    class Cursor:
+        description = [("id",)]
+
+        def __init__(self):
+            self._batches = [[(1,), (2,)], []]
+
+        def execute(self, sql):
+            assert sql.endswith("LIMIT 2")
+
+        def fetchmany(self, _size):
+            return self._batches.pop(0)
+
+        def close(self):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(readengine, "get_connection", lambda *_a, **_k: Conn())
+    monkeypatch.setattr(readengine, "put_connection", lambda *_a, **_k: None)
+    monkeypatch.setattr(readengine, "pool_key_for", lambda *_a, **_k: "key")
+    monkeypatch.setattr(readengine, "enable_read_only", lambda *_a, **_k: False)
+
+    result = readengine.execute_read_only_query(
+        "SELECT id FROM demo", {"db_type": "mysql", "db_code": "demo"},
+        "demo", max_rows=2,
+    )
+
+    assert result["total_rows"] == 2
+    assert "未指定行数限制" in result["warning"]
